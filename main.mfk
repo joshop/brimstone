@@ -1,6 +1,10 @@
 pointer leveldata
 pointer.pointer patterndata
-pointer metadata
+pointer metadata0
+pointer metadata1
+pointer metadata2
+pointer metadata3
+pointer metadata4
 array slice[16]
 array attrslice[8]
 array level_shadow[512]@$0300
@@ -20,12 +24,12 @@ byte whichnmi
 byte controller
 bool decompressing
 byte debug @$0696
+const array level0 @$E000 = file("level0.bin")
 void main() {
     init_rw_memory()
 	ppu_ctrl = %10001000
 	ppu_mask = %00011110
-    leveldata = level0
-    patterndata = level0patterns.pointer
+    read_level_pointers(pointer.word(level0))
     byte i,j
     byte oldscroll
     int24 temp24
@@ -209,6 +213,15 @@ void update_oam_list() {
         oam_index += 4
     }
 }
+void read_level_pointers(pointer.word level) {
+    leveldata = level[0]
+    metadata0 = level[1]
+    metadata1 = level[2]
+    metadata2 = level[3]
+    metadata3 = level[4]
+    metadata4 = level[5]
+    patterndata = pointer.pointer(level[6].pointer)
+}
 inline asm byte ppu_read_data() {
     ! LDA ppu_data
     ? RTS
@@ -275,16 +288,16 @@ void nmi() {
         if (whichnmi == 0) {
             ppu_set_addr(tempaddr)
             for i,0,until,15 {
-                ppu_write_data(level0metas0[slice[i]])
-                ppu_write_data(level0metas2[slice[i]])
+                ppu_write_data(metadata0[slice[i]])
+                ppu_write_data(metadata2[slice[i]])
             }
             whichnmi += 1
             nmitodo &= $9f
         } else if (whichnmi == 1) {
             ppu_set_addr(tempaddr + 1)
             for i,0,until,15 {
-                ppu_write_data(level0metas1[slice[i]])
-                ppu_write_data(level0metas3[slice[i]])
+                ppu_write_data(metadata1[slice[i]])
+                ppu_write_data(metadata3[slice[i]])
             }
             whichnmi = 2
         } else if (whichnmi == 2) {
@@ -327,14 +340,6 @@ void nmi() {
 	ppu_mask = %00011110
     nmitodo &= $fe
 }
-const array level0 = [$06, $cf, $00, $00, $70, $81, $0e, $e0, $02, $0f, $00, $46, $83, $f1, $0d]
-const array level0patterndata = [$33, $03, $84, $01, $30, $86, $de, $03, $05, $fd, $00]
-const array(pointer) level0patterns = [level0patterndata]
-const array level0metas0 = [$00, $01, $02, $03, $04, $06, $0a]
-const array level0metas1 = [$00, $01, $00, $00, $04, $07, $0b]
-const array level0metas2 = [$00, $00, $00, $03, $05, $08, $0a]
-const array level0metas3 = [$00, $00, $02, $00, $05, $09, $0b]
-const array level0metas4 = [$00, $00, $00, $00, $01, $01, $01] // i hate compactness as you can tell
 void decompress_and_draw(byte slice_x) {
     byte current_x, current_y, objs_left
     pointer current_obj
@@ -358,11 +363,11 @@ void decompress_and_draw(byte slice_x) {
     }
     if (slice_x & 1 != 0) {
         for i,0,until,8 {
-            attrslice[i] = (level0metas4[slice[(i << 1)]] << 2) | (level0metas4[slice[(i << 1) + 1]] << 6)
+            attrslice[i] = (metadata4[slice[(i << 1)]] << 2) | (metadata4[slice[(i << 1) + 1]] << 6)
         }
     } else {
         for i,0,until,8 {
-            attrslice[i] = (level0metas4[slice[(i << 1)]]) | (level0metas4[slice[(i << 1) + 1]] << 4)
+            attrslice[i] = (metadata4[slice[(i << 1)]]) | (metadata4[slice[(i << 1) + 1]] << 4)
         }
     }
     decompressing = false
@@ -554,8 +559,8 @@ void redraw_screen() {
         decompress_and_draw(i)
         copy_slice_buffer(i)
         for j,0,until,15 {
-            ppu_write_data(level0metas0[slice[j]])
-            ppu_write_data(level0metas2[slice[j]])
+            ppu_write_data(metadata0[slice[j]])
+            ppu_write_data(metadata2[slice[j]])
         }
         if (hi(scroll_x) & 1 == 0) {
             ppu_set_addr($2001 | (i << 1))
@@ -563,8 +568,8 @@ void redraw_screen() {
             ppu_set_addr($2401 | (i << 1))
         }
         for j,0,until,15 {
-            ppu_write_data(level0metas1[slice[j]])
-            ppu_write_data(level0metas3[slice[j]])
+            ppu_write_data(metadata1[slice[j]])
+            ppu_write_data(metadata3[slice[j]])
         }
         if (hi(scroll_x) & 1 == 0) {
             tempaddr = $23c0 | (i >> 1)

@@ -24,17 +24,16 @@ byte whichnmi
 byte controller
 bool decompressing
 byte debug @$0696
-const array level0 @$E000 = file("level0.bin")
+const array level0 @$E000 = file("level.bin")
 void main() {
     init_rw_memory()
 	ppu_ctrl = %10001000
 	ppu_mask = %00011110
     read_level_pointers(pointer.word(level0))
-    byte i,j
+    byte i,j,k
     byte oldscroll
     int24 temp24
-    word orig_x
-    byte orig_y
+    byte temp_val
     word level_idx
     palette_buffer[0] = $16
     palette_buffer[3] = $06
@@ -42,6 +41,8 @@ void main() {
     nmitodo = $a0
     scroll_x = 0
     set_chr_bank(0)
+    player_x = $90
+    player_y = $30
     while (true) {
         oldscroll = lo(scroll_x)
         update_oam_list()
@@ -73,8 +74,6 @@ controller_loop:
                 jump_grace = -10
             }
         }
-        orig_x = player_x
-        orig_y = player_y
         temp24.hiword = player_x
         temp24.loword.lo = sub_x
         if (vel_x > $7fff) {
@@ -83,13 +82,55 @@ controller_loop:
         temp24 += vel_x
         player_x = temp24.hiword
         sub_x = temp24.loword.lo
+        
+        j = 0
+        k = 0
+        if (vel_x != 0) {
+            level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1)
+            if (hi(vel_x) & $80 == 0) {
+                level_idx += 1
+            }
+            if (solidity[level_shadow[level_idx]] || (player_y & $0f != 0 && solidity[level_shadow[level_idx+32]])) {
+                k += 1
+            }
+        }
+        if (k != 0) { // collision
+            if (hi(vel_x) & $80 != 0) {
+                player_x += 16
+            }
+            player_x.lo &= $f0
+            vel_x = 0
+        }
         temp24.loword.hi = player_y
         temp24.loword.lo = sub_y
         temp24.loword += vel_y
         player_y = temp24.loword.hi
         sub_y = temp24.loword.lo
+        level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1)
+        j = 0
+        k = 0
+        if (vel_y != 0) {
+            if (hi(vel_y) & $80 == 0) {
+                level_idx += 32
+            }
+            if (solidity[level_shadow[level_idx]] || (player_x & $0f != 0 && solidity[level_shadow[level_idx+1]])) {
+                k += 1
+            }
+        }
+        if (k != 0) { // collision
+            if (hi(vel_y) & $80 != 0) {
+                player_y += 16
+                jump_grace = 0
+            } else {
+                jump_grace = 7
+            }
+            player_y &= $f0
+            vel_y = 0
+        } else if (solidity[level_shadow[level_idx+32]]) {
+            jump_grace = 7
+        }
         if (vel_x > 0) {
-            if (vel_x > $7fff) {
+            if (hi(vel_x) & $80 != 0) {
                 if (vel_x >> 2 == $3fff) {
                     vel_x += 1
                 } else {
@@ -105,39 +146,6 @@ controller_loop:
             }
         }
         vel_y += $20
-        level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1)
-        j = 0
-        if (solidity[level_shadow[level_idx]]) {
-            j |= $8
-        }
-        if (lo(player_x) & $0f != 0) {
-            if (solidity[level_shadow[level_idx+1]]) {
-                j |= $4
-            }
-        }
-        if (player_y & $0f != 0) {
-            if (solidity[level_shadow[level_idx+32]]) {
-                j |= $2
-            }
-            if (lo(player_x) & $0f != 0) {
-                if (solidity[level_shadow[level_idx+33]]) {
-                    j |= $1
-                }
-            }
-        }
-        debug = j
-        if (j != 0 && j != $a && j != $5) {
-            vel_y = 0
-            player_y = ((orig_y - 1) | 15) + 1
-            level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1)
-        }
-        if (j > 3 && j != $c) {
-            vel_x = 0
-            player_x = orig_x
-        }
-        if (solidity[level_shadow[level_idx+32]]) {
-            jump_grace = 7
-        }
         if (jump_grace != 0) {
             if (jump_grace > 7) {
                 if (controller & $80 == 0) {
@@ -150,9 +158,17 @@ controller_loop:
             }
         }
         if (scroll_x > 0 && player_x - scroll_x < $40) {
-            scroll_x -= 1
+            if (player_x - scroll_x <= $18) {
+                scroll_x -= 8
+            } else {
+                scroll_x -= 2
+            }
         } else if (player_x - scroll_x > $c0) {
-            scroll_x += 1
+            if (player_x - scroll_x >= $e8) {
+                scroll_x += 8
+            } else {
+                scroll_x += 2
+            }
         }
         if ((oldscroll >> 4) == ((lo(scroll_x) >> 4) + 1) & $f) {
             nmitodo |= $40

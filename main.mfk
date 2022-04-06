@@ -24,6 +24,8 @@ byte whichnmi
 byte controller
 bool decompressing
 byte debug @$0696
+bool gravity_direction
+byte new_controller
 const array level0 @$E000 = file("level.bin")
 void main() {
     init_rw_memory()
@@ -43,9 +45,11 @@ void main() {
     set_chr_bank(0)
     player_x = $90
     player_y = $30
+    gravity_direction = false
     while (true) {
         oldscroll = lo(scroll_x)
         update_oam_list()
+        new_controller = controller
         asm {
             LDA #$01
             STA $4016
@@ -58,6 +62,7 @@ controller_loop:
             ROL controller
             BCC controller_loop
         }
+        new_controller = controller & (new_controller ^ $ff)
         if (controller & 1 != 0) {
             vel_x += $50
         } else if (controller & 2 != 0) {
@@ -74,6 +79,9 @@ controller_loop:
                 jump_grace = -10
             }
         }
+        if (new_controller & $40 != 0) {
+            gravity_direction = not(gravity_direction)
+        }
         temp24.hiword = player_x
         temp24.loword.lo = sub_x
         if (vel_x > $7fff) {
@@ -89,6 +97,9 @@ controller_loop:
             level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1)
             if (hi(vel_x) & $80 == 0) {
                 level_idx += 1
+            }
+            asm {
+                CLC
             }
             if (solidity[level_shadow[level_idx]] || (player_y & $0f != 0 && solidity[level_shadow[level_idx+32]])) {
                 k += 1
@@ -110,6 +121,9 @@ controller_loop:
         j = 0
         k = 0
         if (vel_y != 0) {
+            asm {
+                CLC
+            }
             if (hi(vel_y) & $80 == 0) {
                 level_idx += 32
             }
@@ -145,7 +159,11 @@ controller_loop:
                 }
             }
         }
-        vel_y += $20
+        if (gravity_direction) {
+            vel_y -= $20
+        } else {
+            vel_y += $20
+        }
         if (jump_grace != 0) {
             if (jump_grace > 7) {
                 if (controller & $80 == 0) {
@@ -159,13 +177,13 @@ controller_loop:
         }
         if (scroll_x > 0 && player_x - scroll_x < $40) {
             if (player_x - scroll_x <= $18) {
-                scroll_x -= 8
+                scroll_x -= 9
             } else {
                 scroll_x -= 2
             }
         } else if (player_x - scroll_x > $c0) {
-            if (player_x - scroll_x >= $e8) {
-                scroll_x += 8
+            if (player_x - scroll_x >= $e8)  {
+                scroll_x += 9
             } else {
                 scroll_x += 2
             }
@@ -236,7 +254,7 @@ void read_level_pointers(pointer.word level) {
     metadata2 = level[3]
     metadata3 = level[4]
     metadata4 = level[5]
-    patterndata = pointer.pointer(level[6].pointer)
+    patterndata = pointer.pointer(level[7].pointer)
 }
 inline asm byte ppu_read_data() {
     ! LDA ppu_data
@@ -473,9 +491,9 @@ void decompress_and_draw(byte slice_x) {
     xloop = ((cur_header & %00111100) >> 2) + 1
     yloop = ((cur_header & %00000011)     ) + 1 // made a hacky fix w/o knowing how it works, so might have broken sth
     temp = current_x
-    for i,0,until,xloop  {
+    for i,0,until,yloop  {
         current_x = temp
-        for j,0,until,yloop {
+        for j,0,until,xloop {
             if (current_x <= slice_x && current_x + xsize > slice_x) {
                 asm {
                     LDA current_x

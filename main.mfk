@@ -10,6 +10,8 @@ array attrslice[8]
 array level_shadow[512]@$0300
 array oam[256]@$0200
 array palette_buffer[24]
+array attribute_shadow[128]
+byte which_slice
 volatile byte breakpt
 volatile byte nmitodo // update palette | redraw left seam | redraw right seam | unused | unused | unused | unused | nmi-finished
 word player_x
@@ -175,18 +177,21 @@ controller_loop:
                 jump_grace -= 1
             }
         }
-        if (scroll_x > 0 && player_x - scroll_x < $40) {
+        if (player_x - scroll_x < $40) {
             if (player_x - scroll_x <= $18) {
-                scroll_x -= 9
+                scroll_x -= 8
             } else {
                 scroll_x -= 2
             }
         } else if (player_x - scroll_x > $c0) {
             if (player_x - scroll_x >= $e8)  {
-                scroll_x += 9
+                scroll_x += 8
             } else {
                 scroll_x += 2
             }
+        }
+        if (hi(scroll_x) & $80 != 0) {
+            scroll_x = 0
         }
         if ((oldscroll >> 4) == ((lo(scroll_x) >> 4) + 1) & $f) {
             nmitodo |= $40
@@ -194,14 +199,16 @@ controller_loop:
             nmitodo |= $20
         }
         if (nmitodo & $40 != 0) {
-            i = lo((scroll_x >> 4) - 1)
+            i = lo((scroll_x >> 4)) - 1
             decompress_and_draw(i)
             copy_slice_buffer(i)
+            which_slice = i & 31
         }
         if (nmitodo & $20 != 0) {
-            i = lo((scroll_x >> 4) + 16)
+            i = lo((scroll_x >> 4)) + 16
             decompress_and_draw(i)
             copy_slice_buffer(i)
+            which_slice = i & 31
         }
         nmitodo |= 1
         while ((nmitodo & 1) != 0) {}
@@ -308,7 +315,8 @@ void nmi() {
         ppu_write_data(palette_buffer[23])
         nmitodo &= $7f
     }
-    if (nmitodo & $60 != 0 && not(decompressing)) {
+    if (nmitodo & $60 != 0 && not(decompressing) || whichnmi != 0) {
+        #if 0
         ppu_ctrl = %00001100
         side = nmitodo & $40 != 0
         if (side) {
@@ -321,7 +329,7 @@ void nmi() {
         }
         if (whichnmi == 0) {
             ppu_set_addr(tempaddr)
-            for i,0,until,15 {
+            for i,0,until,14 {
                 ppu_write_data(metadata0[slice[i]])
                 ppu_write_data(metadata2[slice[i]])
             }
@@ -329,7 +337,7 @@ void nmi() {
             nmitodo &= $9f
         } else if (whichnmi == 1) {
             ppu_set_addr(tempaddr + 1)
-            for i,0,until,15 {
+            for i,0,until,14 {
                 ppu_write_data(metadata1[slice[i]])
                 ppu_write_data(metadata3[slice[i]])
             }
@@ -361,6 +369,46 @@ void nmi() {
                 tempaddr -= 8
                 ppu_set_addr(tempaddr)
                 ppu_write_data((buffer[i] & tempval) | attrslice[i])
+            }
+            whichnmi = 0
+        }
+        #endif
+        ppu_ctrl = %00001100
+        nmitodo &= $9f
+        if (whichnmi == 0) {
+            if (which_slice & 16 == 0) {
+                ppu_set_addr($2000 | (which_slice << 1))
+            } else {
+                ppu_set_addr($2400 | ((which_slice & 15) << 1))
+            }
+            for i,0,until,15 {
+                ppu_write_data(metadata0[slice[i]])
+                ppu_write_data(metadata2[slice[i]])
+            }
+            whichnmi += 1
+        } else if (whichnmi == 1) {
+            if (which_slice & 16 == 0) {
+                ppu_set_addr($2000 | ((which_slice << 1) | 1))
+            } else {
+                ppu_set_addr($2400 | (((which_slice & 15) << 1) | 1))
+            }
+            for i,0,until,15 {
+                ppu_write_data(metadata1[slice[i]])
+                ppu_write_data(metadata3[slice[i]])
+            }
+            whichnmi += 1
+        } else {
+            if (which_slice & 16 == 0) {
+                tempaddr = $23c0 | (which_slice >> 1)
+            } else {
+                tempaddr = $27c0 | ((which_slice & 15) >> 1)
+            }
+            tempval = (which_slice >> 1)
+            for i,0,until,8 {
+                ppu_set_addr(tempaddr)
+                tempaddr += 8
+                ppu_write_data(attribute_shadow[tempval])
+                tempval += 8
             }
             whichnmi = 0
         }
@@ -506,49 +554,57 @@ void decompress_and_draw(byte slice_x) {
                     PHA
                     LDA objs_left
                     PHA
-                    LDA i
-                    PHA
-                    LDA j
-                    PHA
                     LDA temp
                     PHA
                     LDA xsize
                     PHA
                     LDA ysize
                     PHA
-                    LDA xloop
+                    LDA i
                     PHA
-                    LDA yloop
-                    PHA
-                    LDA patptr
-                    PHA
-                    LDA patptr+1
-                    PHA
+                }
+                if (patptr[1] & $80 != 0) {
+                    asm {
+                        LDA xloop
+                        PHA
+                        LDA yloop
+                        PHA
+                        LDA patptr
+                        PHA
+                        LDA patptr+1
+                        PHA
+                        LDA j
+                        PHA
+                    }
                 }
                 current_obj = patptr + 2
                 objs_left = patptr[1] & %01111111
                 asm {
                     JSR label(main_loop_asm)
                 }
+                if (patptr[1] & $80 != 0) {
+                    asm {
+                        PLA
+                        STA j
+                        PLA
+                        STA patptr+1
+                        PLA
+                        STA patptr
+                        PLA
+                        STA yloop
+                        PLA
+                        STA xloop
+                    }
+                }
                 asm {
                     PLA
-                    STA patptr+1
-                    PLA
-                    STA patptr
-                    PLA
-                    STA yloop
-                    PLA
-                    STA xloop
+                    STA i
                     PLA
                     STA ysize
                     PLA
                     STA xsize
                     PLA
                     STA temp
-                    PLA
-                    STA j
-                    PLA
-                    STA i
                     PLA
                     STA objs_left
                     PLA
@@ -571,10 +627,26 @@ void decompress_and_draw(byte slice_x) {
 void copy_slice_buffer(byte slice_x) {
     word i
     byte j
+    byte k
     i = (slice_x & $1f)
     for j,0,until,16 {
         level_shadow[i] = slice[j]
         i += 32
+    }
+    i = (slice_x >> 1)
+    k = 0
+    if (slice_x & 1 == 0) {
+        for j,0,until,8 {
+            attribute_shadow[i] = (metadata4[slice[k+1]] << 4) | metadata4[slice[k]] | (attribute_shadow[i] & $cc)
+            k += 2
+            i += 8
+        }
+    } else {
+        for j,0,until,8 {
+            attribute_shadow[i] = (metadata4[slice[k+1]] << 6) | (metadata4[slice[k]] << 2) | (attribute_shadow[i] & $33)
+            k += 2
+            i += 8
+        }
     }
 }
 void redraw_screen() {

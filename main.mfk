@@ -5,6 +5,7 @@ pointer metadata1
 pointer metadata2
 pointer metadata3
 pointer metadata4
+pointer.pointer metaspritedata
 array slice[16]
 array attrslice[8]
 array level_shadow[512]@$0300
@@ -268,6 +269,7 @@ void read_level_pointers(pointer.word level) {
     metadata2 = level[3]
     metadata3 = level[4]
     metadata4 = level[5]
+    metaspritedata = level[6]
     patterndata = pointer.pointer(level[7].pointer)
 }
 inline asm byte ppu_read_data() {

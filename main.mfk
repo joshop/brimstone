@@ -1,57 +1,87 @@
-pointer leveldata
-pointer.pointer patterndata
+pointer leveldata // pointers to level data in rom
+pointer.pointer patterndata // array of pattern pointers
 pointer metadata0
 pointer metadata1
 pointer metadata2
 pointer metadata3
 pointer metadata4
-pointer.pointer metaspritedata
-array slice[16]
-array attrslice[8]
-array level_shadow[512]@$0300
-array oam[256]@$0200
-array palette_buffer[24]
-array attribute_shadow[128]
-byte which_slice
-volatile byte breakpt
+pointer.pointer metaspritedata // array of metasprite pointer
+array slice[16] // current decompressed vertical slice
+array attrslice[8] // the attribute data for that slice
+array level_shadow[512]@$0300 // the current two screens of level data
+array oam[256]@$0200 // oam shadow
+array palette_buffer[24] // holds the palette
+array attribute_shadow[128] // attributes for level_shadow
+byte which_slice // left slice or right slice
+volatile byte breakpt // for debugging
 volatile byte nmitodo // update palette | redraw left seam | redraw right seam | unused | unused | unused | unused | nmi-finished
-word player_x
-byte player_y
-word scroll_x
-word vel_x
-word vel_y
-byte sub_x
-byte sub_y
-byte jump_grace
-byte whichnmi
-byte controller
-bool decompressing
-byte debug @$0696
-bool gravity_direction
-byte new_controller
-byte jet_fuel
-const array level0 @$E000 = file("level.bin")
+word player_x // player x in level
+byte player_y // player y in screen
+word scroll_x // x position of the left side of the screen
+word vel_x // x velocity, 8.8
+word vel_y // y velocity, 8.8
+byte sub_x // lower 8 bits of x
+byte sub_y // lower 8 bits of y
+byte jump_grace // frames left that you can jump
+byte whichnmi // for things that take several frames
+byte controller // controller data
+bool decompressing // currently decompressing
+byte debug @$0696 // for debugging
+bool gravity_direction // is gravity down or up
+byte new_controller // controller data that was pressed this frame
+byte jet_fuel // frames of jetfuel left
+byte oam_index // current writing oam index
+byte player_health
+byte player_iframes
+word level_idx
+byte attack_frames
+bool attacking
+bool player_facing
+// enemy structure:
+// 2 bytes x position
+// 1 byte y position
+// 1 byte enemy type
+// 1 byte enemy health
+// 3 bytes of data
+array(word) enemy_xs[12]
+array enemy_ys[12]
+array enemy_types[12]
+array enemy_healths[12]
+array enemy_data1[12]
+array enemy_data2[12]
+array enemy_data3[12]
+byte enemy_count
+const array level0 @$E000 = file("level.bin") // compressed level data
+const array enemy_metasprites = [1]
+const array enemy_flags = [$c0] // has ai | has collision 
+const array enemy_hitboxes = [$11] // x size : y size 
 void main() {
     init_rw_memory()
-	ppu_ctrl = %10001000
+	ppu_ctrl = %10001000 // things disabled
 	ppu_mask = %00011110
+    enemy_count = 0
     read_level_pointers(pointer.word(level0))
     byte i,j,k
     byte oldscroll
     int24 temp24
     byte temp_val
-    word level_idx
-    palette_buffer[0] = $16
+    palette_buffer[0] = $16 // temporary
     palette_buffer[3] = $06
+    palette_buffer[15] = $16
+    palette_buffer[16] = $27
+    palette_buffer[17] = $18
     redraw_screen()
-    nmitodo = $a0
+    nmitodo = $a0 // update palette and redraw right seam
     scroll_x = 0
     set_chr_bank(0)
-    player_x = $90
+    player_x = $10
     player_y = $30
-    gravity_direction = false
-    jet_fuel = 1
-    while (true) {
+    player_health = 5
+    player_iframes = 0
+    gravity_direction = false // going down
+    jet_fuel = 30
+    //create_enemy(0, $a0, 16)
+    while (player_health != 0 && player_y < $f0) {
         oldscroll = lo(scroll_x)
         update_oam_list()
         new_controller = controller
@@ -67,29 +97,48 @@ controller_loop:
             ROL controller
             BCC controller_loop
         }
-        new_controller = controller & (new_controller ^ $ff)
-        if (controller & 1 != 0) {
+        new_controller = controller & (new_controller ^ $ff) // mask out old bits
+        if (controller & 1 != 0) { // left and right motion
             vel_x += $50
         } else if (controller & 2 != 0) {
             vel_x -= $50
         }
-        if (controller & 4 != 0 && jet_fuel != 0) {
+        if (hi(vel_x) & $80 != 0) {
+            player_facing = true
+        } else if (vel_x != 0) {
+            player_facing = false
+        }
+        if (controller & 4 != 0 && jet_fuel != 0) { // jetpack usage
             vel_y += $40
-            //jet_fuel -= 1
+            jet_fuel -= 1
         } else if (controller & 8 != 0 && jet_fuel != 0) {
             vel_y -= $40
-            //jet_fuel -= 1
+            jet_fuel -= 1
         }
-        if (controller & $80 != 0 && jump_grace != 0) {
+        if (controller & $80 != 0 && jump_grace != 0) { // jumping
             vel_y -= $80
             if (jump_grace < 7) {
                 jump_grace = -10
             }
         }
-        if (new_controller & $40 != 0) {
-            gravity_direction = not(gravity_direction)
+        //if (new_controller & $40 != 0) { // gravity flipping
+        //    gravity_direction = not(gravity_direction) 
+        //}
+        if (new_controller & $40 != 0 && attack_frames <= 6) { // primary attack
+            attacking = true
         }
-        temp24.hiword = player_x
+        if (attack_frames == 0 && attacking) {
+            attack_frames = 20
+            attacking = false
+            i = enemy_collision(player_x+16, player_y, 16)
+            if (i != $ff && enemy_healths[i] != 0) {
+                enemy_healths[i] -= 1
+            }
+            // todo attack animation
+        } else if (attack_frames != 0) {
+            attack_frames -= 1
+        }
+        temp24.hiword = player_x // code for adding velocity to position
         temp24.loword.lo = sub_x
         if (vel_x > $7fff) {
             temp24.hiword.hi += $ff
@@ -97,22 +146,21 @@ controller_loop:
         temp24 += vel_x
         player_x = temp24.hiword
         sub_x = temp24.loword.lo
-        
         j = 0
         k = 0
         if (vel_x != 0) {
-            level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1)
-            if (hi(vel_x) & $80 == 0) {
+            level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1) // index in level shadow where tile is found
+            if (hi(vel_x) & $80 == 0) { // moving to right, so offset one to the right
                 level_idx += 1
             }
+            // CLC needed to circumvent compiler bug
             asm {
-                CLC
+                CLC 
             }
-            if (solidity[level_shadow[level_idx]] || (player_y & $0f != 0 && solidity[level_shadow[level_idx+32]])) {
+            if (solidity[level_shadow[level_idx]] || (player_y & $0f != 0 && solidity[level_shadow[level_idx+32]])) { // collision detect
                 k += 1
             }
         }
-        k = 0
         if (k != 0) { // collision
             if (hi(vel_x) & $80 != 0) {
                 player_x += 16
@@ -120,7 +168,7 @@ controller_loop:
             player_x.lo &= $f0
             vel_x = 0
         }
-        temp24.loword.hi = player_y
+        temp24.loword.hi = player_y // add vely to y pos
         temp24.loword.lo = sub_y
         temp24.loword += vel_y
         player_y = temp24.loword.hi
@@ -149,11 +197,11 @@ controller_loop:
             }
             player_y &= $f0
             vel_y = 0
-        } else if (solidity[level_shadow[level_idx+32]]) {
+        } else if (solidity[level_shadow[level_idx+32]]) { // if on ground, replenish stuff
             jump_grace = 7
             jet_fuel = 30
         }
-        if (vel_x > 0) {
+        if (vel_x > 0) { // apply drag/friction
             if (hi(vel_x) & $80 != 0) {
                 if (vel_x >> 2 == $3fff) {
                     vel_x += 1
@@ -169,12 +217,12 @@ controller_loop:
                 }
             }
         }
-        if (gravity_direction) {
+        if (gravity_direction) { // apply gravity
             vel_y -= $20
         } else {
             vel_y += $20
         }
-        if (jump_grace != 0) {
+        if (jump_grace != 0) { // don't ask me how this works, it handles jumping for different heights
             if (jump_grace > 7) {
                 if (controller & $80 == 0) {
                     jump_grace = 0
@@ -185,45 +233,65 @@ controller_loop:
                 jump_grace -= 1
             }
         }
-        if (player_x - scroll_x < $40) {
+        if (player_x - scroll_x < $40) { // scroll forwards
             if (player_x - scroll_x <= $18) {
                 scroll_x -= 8
             } else {
                 scroll_x -= 2
             }
-        } else if (player_x - scroll_x > $c0) {
+        } else if (player_x - scroll_x > $c0) { // backwards
             if (player_x - scroll_x >= $e8)  {
                 scroll_x += 8
             } else {
                 scroll_x += 2
             }
         }
-        if (hi(scroll_x) & $80 != 0) {
+        if (hi(scroll_x) & $80 != 0) { // no scrolling off the left edge 
             scroll_x = 0
         }
-        if ((oldscroll >> 4) == ((lo(scroll_x) >> 4) + 1) & $f) {
+        i = 0
+        while (i < enemy_count) {
+            if (enemy_healths[i] == 0 || enemy_ys[i] >= $f0) {
+                destroy_enemy(i)
+            } else {
+                i += 1
+            }
+        }
+        for i,0,until,enemy_count {
+            j = enemy_types[i] //  && controller & $20 != 0
+            if (enemy_flags[j] & $80 != 0 && (hi(player_x-enemy_xs[i]) == 0 || hi(player_x-enemy_xs[i]) == $ff)) {
+                call(enemy_funcs[j], i)
+            }
+            if (enemy_flags[j] & $40 != 0) {
+                if (lo(player_x - enemy_xs[i]) > sbyte(-16) && lo(player_x - enemy_xs[i]) < sbyte((enemy_hitboxes[j] & $f0) >> 1)) {
+                    if (player_y - enemy_ys[i] > sbyte(-16) && (player_y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
+                        call(enemy_cfuncs[j], i)
+                    }
+                }
+            }
+        }
+        if ((oldscroll >> 4) == ((lo(scroll_x) >> 4) + 1) & $f) { // if we need to draw one of the slices
             nmitodo |= $40
         } else if ((oldscroll >> 4) == ((lo(scroll_x) >> 4) - 1) & $f) {
             nmitodo |= $20
         }
-        if (nmitodo & $40 != 0) {
+        if (nmitodo & $40 != 0) { // decompress it first
             i = lo((scroll_x >> 4)) - 1
             decompress_and_draw(i)
             copy_slice_buffer(i)
             which_slice = i & 31
         }
-        if (nmitodo & $20 != 0) {
+        if (nmitodo & $20 != 0) { // likewise
             i = lo((scroll_x >> 4)) + 16
             decompress_and_draw(i)
             copy_slice_buffer(i)
             which_slice = i & 31
         }
         nmitodo |= 1
-        while ((nmitodo & 1) != 0) {}
+        while ((nmitodo & 1) != 0) {} // wait until nmi done
     }
 }
-void update_oam_list() {
-    byte oam_index
+void update_oam_list_old() {
     oam_index = 0
     oam[oam_index] = player_y
     oam_index += 1
@@ -262,24 +330,208 @@ void update_oam_list() {
         oam_index += 4
     }
 }
-void read_level_pointers(pointer.word level) {
+void basic_enemy_ai(byte id) {
+    bool a, b
+    // this is just an optimization goldmine, when you get slowdown go here
+    level_idx = (lo(enemy_xs[id] >> 4) & $1f) | (word(enemy_ys[id] & $f0) << 1)
+    if (enemy_data1[id] != 0) {
+        enemy_ys[id] &= $f0
+        // walking state
+        // 1. possibly enter running state
+        // 2. move
+        // 3. collision detect with walls
+        // 4. collision detect with floor
+        if (player_y - enemy_ys[id] < sbyte(16) && player_y - enemy_ys[id] > sbyte(-16)) {
+            if (enemy_data1[id] & $80 != 0) {
+                enemy_data1[id] >>= 1
+                enemy_data3[id] = 20
+                if (player_x < enemy_xs[id]) {
+                    enemy_data2[id] = $80
+                } else {
+                    enemy_data2[id] = 0
+                }
+                return
+            } else if (enemy_data3[id] != 0) {
+                enemy_data3[id] -= 1
+                return
+            }
+        } else if (enemy_data1[id] & $40 != 0) {
+            enemy_data1[id] <<= 1
+            return
+        }
+        if (enemy_data2[id] != 0) {
+            enemy_xs[id] -= 1
+            if (enemy_data1[id] & $40 != 0) {
+                enemy_xs[id] -= 3
+            }
+            if (solidity[level_shadow[level_idx]]) {
+                enemy_data2[id] <<= 1
+                enemy_xs[id].lo &= $f0
+                enemy_xs[id] += 16
+                if (enemy_data1[id] & $40 != 0) {
+                    enemy_data1[id] <<= 1
+                }
+                return
+            }
+        } else {
+            enemy_xs[id] += 1
+            if (enemy_data1[id] & $40 != 0) {
+                enemy_xs[id] += 3
+            }
+            if (solidity[level_shadow[level_idx+1]]) {
+                enemy_data2[id] = $80
+                enemy_xs[id].lo &= $f0
+                if (enemy_data1[id] & $40 != 0) {
+                    enemy_data1[id] <<= 1
+                }
+                return
+            }
+        }
+        level_idx += 32
+        if (enemy_data2[id] == 0) {
+            level_idx += 1
+        }
+        a = solidity[level_shadow[level_idx]]
+        if (enemy_data2[id] == 0) {
+            level_idx -= 1
+        } else {
+            level_idx += 1
+        }
+        b = solidity[level_shadow[level_idx]]
+        if (not(a || b)) {
+            enemy_data1[id] = 0
+            enemy_data3[id] = 0
+        } else if (not(a) && enemy_data1[id] & $40 == 0) {
+            enemy_data2[id] ^= $80
+        }
+    } else {
+        enemy_ys[id] += enemy_data3[id] >> 4
+        enemy_data3[id] += 4
+        if (solidity[level_shadow[level_idx+32]]) {
+            enemy_data1[id] = $80
+        }
+    }
+}
+void basic_enemy_collide(byte id) {
+    if (player_iframes != 0) {
+        return
+    }
+    player_health -= 1
+    player_iframes = 30
+}
+const array(function.byte.to.void) enemy_funcs = [basic_enemy_ai.pointer]
+const array(function.byte.to.void) enemy_cfuncs = [basic_enemy_collide.pointer]
+void create_enemy(byte type, word x, byte y) {
+    enemy_types[enemy_count] = type
+    enemy_xs[enemy_count] = x
+    enemy_ys[enemy_count] = y
+    enemy_healths[enemy_count] = 1
+    enemy_data1[enemy_count] = 0
+    enemy_data2[enemy_count] = $80
+    enemy_count += 1
+}
+void destroy_enemy(byte id) {
+    enemy_count -= 1
+    enemy_types[id] = enemy_types[enemy_count]
+    enemy_xs[id] = enemy_xs[enemy_count]
+    enemy_ys[id] = enemy_ys[enemy_count]
+    enemy_healths[id] = enemy_healths[enemy_count]
+}
+void draw_metasprite(byte x, byte y, byte type, byte flip) { // draw metasprite at screen coordinates x, y 
+    pointer metasprite
+    byte count
+    byte i
+    metasprite = metaspritedata[type]
+    count = metasprite[0]
+    metasprite += 1
+    for i,0,until,count {
+        if (flip & $80 == 0) {
+            oam[oam_index] = y+metasprite[1]
+        } else {
+            oam[oam_index] = y-metasprite[1]
+        }
+        oam_index += 1
+        oam[oam_index] = metasprite[2]
+        oam_index += 1
+        oam[oam_index] = metasprite[3] ^ flip
+        oam_index += 1
+        if (flip & $40 == 0) {
+            oam[oam_index] = x+metasprite[0]
+        } else {
+            oam[oam_index] = x-metasprite[0]
+        }
+        oam_index += 1
+        metasprite += 4
+    }
+}
+void update_oam_list() { // draw all metasprites to oam
+    byte i,j
+    oam_index = 0
+    if (jump_grace != 6) {
+        j = 3
+    } else if (vel_x == 0) {
+        j = 0
+    } else if (lo(player_x) & $4 == 0) {
+        j = 1
+    } else {
+        j = 2
+    }
+    if (player_iframes & 1 == 0) {
+        if (player_facing) {
+            draw_metasprite(lo(player_x - scroll_x) + 8, player_y, j, $40)
+        } else {
+            draw_metasprite(lo(player_x - scroll_x), player_y, j, 0)
+        }
+    }
+    if (player_iframes != 0) {
+        player_iframes -= 1
+    }
+    for i,0,until,enemy_count {
+        if (hi(enemy_xs[i]-scroll_x) == 0) {
+            if (enemy_data2[i] & $80 != 0) {
+                j = 8
+            } else {
+                j = 0
+            }
+            draw_metasprite(lo(enemy_xs[i] - scroll_x) + j, enemy_ys[i], enemy_metasprites[enemy_types[i]], (enemy_data2[i] & $80) >> 1)
+        }
+    }
+    while (oam_index != $00) { // fill unused sprites with ff in y
+        oam[oam_index] = $ff
+        oam_index += 4
+    }
+}
+byte enemy_collision(word x, byte y, byte size) {
+    byte i,j
+    for i,0,until,enemy_count {
+        j = enemy_types[i]
+        if (lo(x - enemy_xs[i]) > sbyte(-size) && lo(x - enemy_xs[i]) < sbyte((enemy_hitboxes[j] & $f0) >> 1)) {
+            if (y - enemy_ys[i] > sbyte(-size) && (y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
+                return i
+            }
+        }
+    }
+    return $ff
+}
+
+void read_level_pointers(pointer.word level) { // read in the level data pointers
     leveldata = level[0]
     metadata0 = level[1]
     metadata1 = level[2]
     metadata2 = level[3]
     metadata3 = level[4]
     metadata4 = level[5]
-    metaspritedata = level[6]
+    metaspritedata = pointer.pointer(level[6])
     patterndata = pointer.pointer(level[7].pointer)
 }
-inline asm byte ppu_read_data() {
+inline asm byte ppu_read_data() { // read a byte from the ppu read port
     ! LDA ppu_data
     ? RTS
 }
 void irq() {
 
 }
-const array(bool) solidity = [false, true, true, true, false, false, false, false]
+const array(bool) solidity = [false, true, true, true, false, false, false, false] // whether each metatile is solid
 void nmi() {
     byte i, j
     word tempaddr
@@ -289,7 +541,7 @@ void nmi() {
 	ppu_mask = %00000000
 	ppu_ctrl = %00001000
     ppu_oam_dma_write(oam.addr.hi)
-    if (nmitodo & $80 != 0) {
+    if (nmitodo & $80 != 0) { // reupdate palette from buffer
         ppu_set_addr($3f01)
         ppu_write_data(palette_buffer[0])
         ppu_write_data(palette_buffer[1])
@@ -324,7 +576,8 @@ void nmi() {
         ppu_write_data(palette_buffer[23])
         nmitodo &= $7f
     }
-    if (nmitodo & $60 != 0 && not(decompressing) || whichnmi != 0) {
+    if (nmitodo & $60 != 0 && not(decompressing) || whichnmi != 0) { // draw a slice 
+        // THIS IS ALL COMMENTED OUT
         #if 0
         ppu_ctrl = %00001100
         side = nmitodo & $40 != 0
@@ -382,6 +635,7 @@ void nmi() {
             whichnmi = 0
         }
         #endif
+        // END COMMENTED SECTION
         ppu_ctrl = %00001100
         nmitodo &= $9f
         if (whichnmi == 0) {
@@ -422,16 +676,20 @@ void nmi() {
             whichnmi = 0
         }
     }
-    ppu_set_scroll(lo(scroll_x),0)
+    ppu_set_scroll(lo(scroll_x),0) // scroll properly
     if (hi(scroll_x) & 1 == 0) {
 	    ppu_ctrl = %10001000
     } else {
         ppu_ctrl = %10001001
     }
-	ppu_mask = %00011110
-    nmitodo &= $fe
+    if (player_health == 1) {
+	    ppu_mask = %00111110
+    } else {
+        ppu_mask = %00011110
+    }
+    nmitodo &= $fe // mark finished bit
 }
-void decompress_and_draw(byte slice_x) {
+void decompress_and_draw(byte slice_x) { // decompress an x position and write it to the buffer
     byte current_x, current_y, objs_left
     pointer current_obj
     byte cur_header
@@ -440,19 +698,19 @@ void decompress_and_draw(byte slice_x) {
     byte xsize, ysize
     byte i,j
     byte xloop, yloop
-    decompressing = true
-    breakpt = slice_x
+    decompressing = true // so that it doesn't try to draw it yet
     for i,0,until,16 {
-        slice[i] = 0
+        slice[i] = 0 // default
     }
     current_obj = leveldata + 1
-    objs_left = leveldata[0]
+    objs_left = leveldata[0] // first byte is count
     current_x = 0
     current_y = 0
     asm {
         JSR label(main_loop_asm)
     }
-    if (slice_x & 1 != 0) {
+    // will reach here once decompression done
+    if (slice_x & 1 != 0) { // assign proper attribute
         for i,0,until,8 {
             attrslice[i] = (metadata4[slice[(i << 1)]] << 2) | (metadata4[slice[(i << 1) + 1]] << 6)
         }
@@ -466,7 +724,7 @@ void decompress_and_draw(byte slice_x) {
         RTS
         main_loop_asm:
     }
-    label main_loop
+    label main_loop // call stack is used for pattern playback recursion
     if (objs_left == 0) {
         asm {
             RTS
@@ -474,7 +732,7 @@ void decompress_and_draw(byte slice_x) {
     }
     objs_left -= 1
     cur_header = current_obj[0]
-    if (cur_header & %11000000 == %01000000 && cur_header & %00111111 != 0) {
+    if (cur_header & %11000000 == %01000000 && cur_header & %00111111 != 0) { // movement command
         temp = (cur_header & %00111000) >> 3
         if (temp > 3) {
             current_x -= 8 << 3
@@ -488,7 +746,7 @@ void decompress_and_draw(byte slice_x) {
         current_obj += 1
         goto main_loop
     }
-    temp = current_obj[1] >> 4
+    temp = current_obj[1] >> 4 // add the offset if not movement command
     if (temp > 7) {
         current_x -= 16
     }
@@ -498,7 +756,7 @@ void decompress_and_draw(byte slice_x) {
         current_y -= 16
     }
     current_y += temp
-    if (cur_header & %11000000 == 0) {
+    if (cur_header & %11000000 == 0) { // point command (not really?)
         if (current_x == slice_x) { 
             slice[current_y] = cur_header & %00111111
         }
@@ -507,7 +765,7 @@ void decompress_and_draw(byte slice_x) {
         current_obj += 3
         goto main_loop
     }
-    if (cur_header & %11000000 == %01000000) {
+    if (cur_header & %11000000 == %01000000) { // datablock command
         xsize = (current_obj[2] >> 4) + 1
         ysize = (current_obj[2] & %00001111) + 1
         if (current_x <= slice_x && current_x+xsize > slice_x) {
@@ -526,7 +784,7 @@ void decompress_and_draw(byte slice_x) {
         }
         goto main_loop
     }
-    if (cur_header & %11000000 == %10000000) {
+    if (cur_header & %11000000 == %10000000) { // rectangle command
         xsize = (current_obj[2] >> 4) + 1
         ysize = (current_obj[2] & %00001111) + 1
         if (current_x <= slice_x && current_x+xsize > slice_x) {
@@ -542,6 +800,7 @@ void decompress_and_draw(byte slice_x) {
         current_obj += 3
         goto main_loop
     }
+    // it must be pattern reference
     patptr = patterndata[current_obj[2]]
     xsize = (patptr[0] >> 4) + 1
     ysize = (patptr[0] & %00001111) + 1
@@ -552,6 +811,7 @@ void decompress_and_draw(byte slice_x) {
         current_x = temp
         for j,0,until,xloop {
             if (current_x <= slice_x && current_x + xsize > slice_x) {
+                // backup state to the stack
                 asm {
                     LDA current_x
                     PHA
@@ -633,7 +893,7 @@ void decompress_and_draw(byte slice_x) {
     current_obj += 3
     goto main_loop
 }
-void copy_slice_buffer(byte slice_x) {
+void copy_slice_buffer(byte slice_x) { // copy slice into the level and attribute shadows
     word i
     byte j
     byte k
@@ -658,7 +918,7 @@ void copy_slice_buffer(byte slice_x) {
         }
     }
 }
-void redraw_screen() {
+void redraw_screen() { // redraw entire screen from compressed data
     byte i,j
     word tempaddr
     array buffer[8]

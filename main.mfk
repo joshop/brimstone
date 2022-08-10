@@ -34,9 +34,15 @@ byte oam_index // current writing oam index
 byte player_health
 byte player_iframes
 word level_idx
+byte attack_held_frames
 byte attack_frames
-bool attacking
+bool sword_out
+word sword_x
+byte sword_y
 bool player_facing
+byte animation_timer
+byte dash_frames
+byte dash_direction
 // enemy structure:
 // 2 bytes x position
 // 1 byte y position
@@ -51,20 +57,27 @@ array enemy_data1[12]
 array enemy_data2[12]
 array enemy_data3[12]
 byte enemy_count
+array(word) effect_xs[12]
+array effect_ys[12]
+array effect_sprites[12]
+array effect_timers[12]
+byte effect_count
+array size_test[200]
 const array level0 @$E000 = file("level.bin") // compressed level data
-const array enemy_metasprites = [1]
-const array enemy_flags = [$c0] // has ai | has collision 
-const array enemy_hitboxes = [$11] // x size : y size 
+const array enemy_flags = [$c0, $c0] // has ai | has collision 
+const array enemy_hitboxes = [$22, $11] // x size : y size 
 void main() {
     init_rw_memory()
 	ppu_ctrl = %10001000 // things disabled
 	ppu_mask = %00011110
     enemy_count = 0
+    effect_count = 0
     read_level_pointers(pointer.word(level0))
     byte i,j,k
     byte oldscroll
     int24 temp24
     byte temp_val
+    size_test[0] = 1
     palette_buffer[0] = $16 // temporary
     palette_buffer[3] = $06
     palette_buffer[15] = $16
@@ -79,7 +92,8 @@ void main() {
     player_health = 5
     player_iframes = 0
     gravity_direction = false // going down
-    jet_fuel = 30
+    jet_fuel = 0
+    sword_out = false
     //create_enemy(0, $a0, 16)
     while (player_health != 0 && player_y < $f0) {
         oldscroll = lo(scroll_x)
@@ -98,10 +112,12 @@ controller_loop:
             BCC controller_loop
         }
         new_controller = controller & (new_controller ^ $ff) // mask out old bits
-        if (controller & 1 != 0) { // left and right motion
-            vel_x += $50
-        } else if (controller & 2 != 0) {
-            vel_x -= $50
+        if (attack_held_frames == 0) {
+            if (controller & 1 != 0) { // left and right motion
+                vel_x += $50
+            } else if (controller & 2 != 0) {
+                vel_x -= $50
+            }
         }
         if (hi(vel_x) & $80 != 0) {
             player_facing = true
@@ -124,19 +140,41 @@ controller_loop:
         //if (new_controller & $40 != 0) { // gravity flipping
         //    gravity_direction = not(gravity_direction) 
         //}
-        if (new_controller & $40 != 0 && attack_frames <= 6) { // primary attack
-            attacking = true
-        }
-        if (attack_frames == 0 && attacking) {
+        if (controller & $40 != 0 && not(sword_out)) { // primary attack
+            if (attack_held_frames > $20) {
+                sword_out = true
+                sword_x = player_x
+                sword_y = player_y
+                attack_frames = controller & $0f
+                attack_held_frames = 0
+            } else {
+                attack_held_frames += 1
+            }
+        } else if (attack_held_frames != 0 && attack_frames == 0) {
             attack_frames = 20
-            attacking = false
+            attack_held_frames = 0
             i = enemy_collision(player_x+16, player_y, 16)
             if (i != $ff && enemy_healths[i] != 0) {
                 enemy_healths[i] -= 1
             }
             // todo attack animation
-        } else if (attack_frames != 0) {
+        }
+        if (attack_frames != 0 && not(sword_out)) {
             attack_frames -= 1
+        } else if (sword_out) {
+            if (attack_frames & 1 != 0) {
+                sword_x += 3
+            } else if (attack_frames & 2 != 0) {
+                sword_x -= 3
+            }
+            if (attack_frames & 4 != 0) {
+                sword_y += 3
+            } else if (attack_frames & 8 != 0) {
+                sword_y -= 3
+            }
+            if (hi(sword_x - scroll_x) != 0 || (sword_y >= $f0)) {
+                sword_out = false
+            }
         }
         temp24.hiword = player_x // code for adding velocity to position
         temp24.loword.lo = sub_x
@@ -192,36 +230,18 @@ controller_loop:
                 player_y += 16
                 jump_grace = 0
             } else {
-                jet_fuel = 30
+                //jet_fuel = 30
                 jump_grace = 7
+                dash_frames = 0
             }
             player_y &= $f0
             vel_y = 0
-        } else if (solidity[level_shadow[level_idx+32]]) { // if on ground, replenish stuff
+        } else if (solidity[level_shadow[level_idx]]) { // if on ground, replenish stuff (originally had +32)
             jump_grace = 7
-            jet_fuel = 30
+            //jet_fuel = 30
+            dash_frames = 0
         }
-        if (vel_x > 0) { // apply drag/friction
-            if (hi(vel_x) & $80 != 0) {
-                if (vel_x >> 2 == $3fff) {
-                    vel_x += 1
-                } else {
-                    vel_x -= vel_x >> 2
-                    vel_x.hi -= $c0
-                }
-            } else {
-                if (vel_x >> 2 == 0) {
-                    vel_x -= 1
-                } else {
-                    vel_x -= vel_x >> 2
-                }
-            }
-        }
-        if (gravity_direction) { // apply gravity
-            vel_y -= $20
-        } else {
-            vel_y += $20
-        }
+        
         if (jump_grace != 0) { // don't ask me how this works, it handles jumping for different heights
             if (jump_grace > 7) {
                 if (controller & $80 == 0) {
@@ -231,6 +251,57 @@ controller_loop:
                 }
             } else {
                 jump_grace -= 1
+            }
+        } else if (new_controller & $80 != 0 && dash_frames & $80 == 0 && controller & $0f != 0) { // perform dash
+            dash_frames = $8a
+            dash_direction = controller
+            vel_x = 0
+            vel_y = 0
+        }
+        if (dash_frames & $7f != 0) {
+            dash_frames -= 1
+            if (dash_frames & 4 == 0) {
+                create_effect($0f, player_x, player_y, $10)
+            }
+            if (dash_direction & $8 != 0) {
+                vel_y.hi -= 1
+            } else if (dash_direction & $4 != 0) {
+                vel_y.hi += 1
+            } else {
+                vel_y = 0
+            }
+            if (dash_direction & $2 != 0) {
+                vel_x.hi -= 1
+            } else if (dash_direction & $1 != 0) {
+                vel_x.hi += 1
+            } else {
+                vel_x = 0
+            }
+            if (dash_frames & $7f == 0) {
+                vel_x = 0
+                vel_y = 0
+            }
+        } else {
+            if (gravity_direction) { // apply gravity
+                vel_y -= $20
+            } else {
+                vel_y += $20
+            }
+            if (vel_x > 0) { // apply drag/friction
+                if (hi(vel_x) & $80 != 0) {
+                    if (vel_x >> 2 == $3fff) {
+                        vel_x += 1
+                    } else {
+                        vel_x -= vel_x >> 2
+                        vel_x.hi -= $c0
+                    }
+                } else {
+                    if (vel_x >> 2 == 0) {
+                        vel_x -= 1
+                    } else {
+                        vel_x -= vel_x >> 2
+                    }
+                }
             }
         }
         if (player_x - scroll_x < $40) { // scroll forwards
@@ -251,23 +322,42 @@ controller_loop:
         }
         i = 0
         while (i < enemy_count) {
-            if (enemy_healths[i] == 0 || enemy_ys[i] >= $f0) {
+            if (enemy_healths[i] == 0 || enemy_ys[i] >= $f0 || (hi(player_x-enemy_xs[i]) != 0 && hi(player_x-enemy_xs[i]) != $ff)) {
                 destroy_enemy(i)
+                if (enemy_healths[i] == 0) {
+                    create_effect($0f, enemy_xs[i], enemy_ys[i], $20)
+                }
             } else {
                 i += 1
             }
         }
         for i,0,until,enemy_count {
             j = enemy_types[i] //  && controller & $20 != 0
-            if (enemy_flags[j] & $80 != 0 && (hi(player_x-enemy_xs[i]) == 0 || hi(player_x-enemy_xs[i]) == $ff)) {
+            if (enemy_flags[j] & $80 != 0 && (hi(scroll_x-enemy_xs[i]) == 0 || hi(scroll_x-enemy_xs[i]) == $ff)) {
                 call(enemy_funcs[j], i)
             }
             if (enemy_flags[j] & $40 != 0) {
                 if (lo(player_x - enemy_xs[i]) > sbyte(-16) && lo(player_x - enemy_xs[i]) < sbyte((enemy_hitboxes[j] & $f0) >> 1)) {
                     if (player_y - enemy_ys[i] > sbyte(-16) && (player_y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
-                        call(enemy_cfuncs[j], i)
+                        if (dash_frames & $7f != 0) {
+                            if (enemy_healths[i] != 0) {
+                                enemy_healths[i] -= 1
+                            }
+                            dash_frames &= $7f
+                        } else {
+                            call(enemy_cfuncs[j], i)
+                        }
                     }
                 }
+            }
+        }
+        i = 0
+        while (i < effect_count) {
+            effect_timers[i] -= 1
+            if (effect_timers[i] == 0) {
+                destroy_effect(i)
+            } else {
+                i += 1
             }
         }
         if ((oldscroll >> 4) == ((lo(scroll_x) >> 4) + 1) & $f) { // if we need to draw one of the slices
@@ -287,6 +377,7 @@ controller_loop:
             copy_slice_buffer(i)
             which_slice = i & 31
         }
+        animation_timer += 1
         nmitodo |= 1
         while ((nmitodo & 1) != 0) {} // wait until nmi done
     }
@@ -412,6 +503,25 @@ void basic_enemy_ai(byte id) {
         }
     }
 }
+void prat_enemy_ai(byte id) {
+    if (enemy_data1[id] & $30 == 0) {
+        if (enemy_xs[id] > player_x) {
+            enemy_xs[id] -= 1
+        } else if (enemy_xs[id] < player_x) {
+            enemy_xs[id] += 1
+        }
+        if (enemy_ys[id] > player_y) {
+            enemy_ys[id] -= 1
+        } else if (enemy_ys[id] < player_y) {
+            enemy_ys[id] += 1
+        }
+    }
+    if (enemy_data1[id] & $80 != 0) {
+        enemy_data1[id] = 0
+    } else {
+        enemy_data1[id] += 1
+    }
+}
 void basic_enemy_collide(byte id) {
     if (player_iframes != 0) {
         return
@@ -419,9 +529,10 @@ void basic_enemy_collide(byte id) {
     player_health -= 1
     player_iframes = 30
 }
-const array(function.byte.to.void) enemy_funcs = [basic_enemy_ai.pointer]
-const array(function.byte.to.void) enemy_cfuncs = [basic_enemy_collide.pointer]
+const array(function.byte.to.void) enemy_funcs = [basic_enemy_ai.pointer, prat_enemy_ai.pointer]
+const array(function.byte.to.void) enemy_cfuncs = [basic_enemy_collide.pointer, basic_enemy_collide.pointer]
 void create_enemy(byte type, word x, byte y) {
+    return
     enemy_types[enemy_count] = type
     enemy_xs[enemy_count] = x
     enemy_ys[enemy_count] = y
@@ -436,6 +547,20 @@ void destroy_enemy(byte id) {
     enemy_xs[id] = enemy_xs[enemy_count]
     enemy_ys[id] = enemy_ys[enemy_count]
     enemy_healths[id] = enemy_healths[enemy_count]
+}
+void create_effect(byte type, word x, byte y, byte timer) {
+    effect_sprites[effect_count] = type
+    effect_xs[effect_count] = x
+    effect_ys[effect_count] = y
+    effect_timers[effect_count] = timer
+    effect_count += 1
+}
+void destroy_effect(byte id) {
+    effect_count -= 1
+    effect_sprites[id] = effect_sprites[effect_count]
+    effect_xs[id] = effect_xs[effect_count]
+    effect_ys[id] = effect_ys[effect_count]
+    effect_timers[id] = effect_timers[effect_count]
 }
 void draw_metasprite(byte x, byte y, byte type, byte flip) { // draw metasprite at screen coordinates x, y 
     pointer metasprite
@@ -465,7 +590,7 @@ void draw_metasprite(byte x, byte y, byte type, byte flip) { // draw metasprite 
     }
 }
 void update_oam_list() { // draw all metasprites to oam
-    byte i,j
+    byte i,j,k
     oam_index = 0
     if (jump_grace != 6) {
         j = 3
@@ -486,6 +611,44 @@ void update_oam_list() { // draw all metasprites to oam
     if (player_iframes != 0) {
         player_iframes -= 1
     }
+    if (sword_out) { // this part needs to be refactored eventually
+        if (attack_frames & (attack_frames - 1) == 0) { // orthogonal, but maybe comparisons would be faster
+            if (attack_frames & $0c != 0) { // vertical
+                if (attack_frames == 4) {
+                    i = 8
+                    k = $80
+                } else {
+                    i = 0
+                    k = 0
+                }
+                draw_metasprite(lo(sword_x - scroll_x), sword_y + i, $0a, k)
+            } else {
+                if (attack_frames == 1) {
+                    i = 8
+                    k = $40
+                } else {
+                    i = 0
+                    k = 0
+                }
+                draw_metasprite(lo(sword_x - scroll_x) + i, sword_y, $09, k)
+            }
+        } else {
+            k = 0
+            if (attack_frames & $04 != 0) {
+                i = 8
+                k |= $80 
+            } else {
+                i = 0
+            }
+            if (attack_frames & $01 != 0) {
+                j = 8
+                k |= $40
+            } else {
+                j = 0
+            }
+            draw_metasprite(lo(sword_x - scroll_x) + i, sword_y + j, $0b, k)
+        }
+    }
     for i,0,until,enemy_count {
         if (hi(enemy_xs[i]-scroll_x) == 0) {
             if (enemy_data2[i] & $80 != 0) {
@@ -493,13 +656,34 @@ void update_oam_list() { // draw all metasprites to oam
             } else {
                 j = 0
             }
-            draw_metasprite(lo(enemy_xs[i] - scroll_x) + j, enemy_ys[i], enemy_metasprites[enemy_types[i]], (enemy_data2[i] & $80) >> 1)
+            draw_metasprite(lo(enemy_xs[i] - scroll_x) + j, enemy_ys[i], get_metasprite(i), (enemy_data2[i] & $80) >> 1)
+        }
+    }
+    for i,0,until,effect_count {
+        if (hi(effect_xs[i]-scroll_x) == 0) {
+            draw_metasprite(lo(effect_xs[i] - scroll_x), effect_ys[i], effect_sprites[i], 0)
         }
     }
     while (oam_index != $00) { // fill unused sprites with ff in y
         oam[oam_index] = $ff
         oam_index += 4
     }
+}
+byte get_metasprite(byte id) {
+    // todo replace w/ return dispatch when it grows too large, or refactor this whole area
+    byte j
+    j = enemy_types[id]
+    if (j == 0) {
+        if (lo(enemy_xs[id]) & $08 != 0) {
+            return $0c
+        } else {
+            return $0d
+        }
+    }
+    if (j == 1) {
+        return $0e
+    }
+    return $ff
 }
 byte enemy_collision(word x, byte y, byte size) {
     byte i,j
@@ -671,7 +855,7 @@ void nmi() {
                 ppu_set_addr(tempaddr)
                 tempaddr += 8
                 ppu_write_data(attribute_shadow[tempval])
-                tempval += 8
+                tempval += 16 // was 8
             }
             whichnmi = 0
         }
@@ -685,7 +869,13 @@ void nmi() {
     if (player_health == 1) {
 	    ppu_mask = %00111110
     } else {
-        ppu_mask = %00011110
+        if (attack_frames > 16) {
+            ppu_mask = %10011110
+        } else if (sword_out) {
+            ppu_mask = %01011110 
+        } else {
+            ppu_mask = %00011110
+        }
     }
     nmitodo &= $fe // mark finished bit
 }
@@ -758,11 +948,12 @@ void decompress_and_draw(byte slice_x) { // decompress an x position and write i
     current_y += temp
     if (cur_header & %11000000 == 0) { // point command (not really?)
         if (current_x == slice_x) { 
-            slice[current_y] = cur_header & %00111111
+            //slice[current_y] = cur_header & %00111111
+            create_enemy(cur_header & %00111111, word(current_x) << 4, current_y << 4)
         }
         current_x += 1
         current_y += 1
-        current_obj += 3
+        current_obj += 2
         goto main_loop
     }
     if (cur_header & %11000000 == %01000000) { // datablock command
@@ -908,13 +1099,13 @@ void copy_slice_buffer(byte slice_x) { // copy slice into the level and attribut
         for j,0,until,8 {
             attribute_shadow[i] = (metadata4[slice[k+1]] << 4) | metadata4[slice[k]] | (attribute_shadow[i] & $cc)
             k += 2
-            i += 8
+            i += 16 // was 8
         }
     } else {
         for j,0,until,8 {
             attribute_shadow[i] = (metadata4[slice[k+1]] << 6) | (metadata4[slice[k]] << 2) | (attribute_shadow[i] & $33)
             k += 2
-            i += 8
+            i += 16 // was 8
         }
     }
 }

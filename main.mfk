@@ -77,14 +77,9 @@ array size_test[200]
 const array level0 @$E000 = file("level.bin") // compressed level data
 const array enemy_flags = [$d0, $d0, $a0] // has ai | has collision | invisible | vulnerable
 const array enemy_hitboxes = [$22, $22, $00] // x size : y size 
-// TODO
-// improve attack control
-// introduce simpler basic enemy
-// 
-// fix the seam bug
+
 
 // BUG TRACKER
-// enemy visible while off screen (low priority)
 // detection range for the falling floor (low priority)
 void main() {
     init_rw_memory()
@@ -94,6 +89,7 @@ void main() {
     effect_count = 0
     read_level_pointers(pointer.word(level0))
     byte i,j,k
+    word l @ $00EB
     byte oldscroll
     int24 temp24
     byte temp_val
@@ -156,7 +152,7 @@ controller_loop:
             jet_fuel -= 1
         }
         if (controller & $80 != 0 && jump_grace != 0) { // jumping
-            vel_y -= $70
+            vel_y -= $b0
             if (jump_grace < 7) {
                 jump_grace = -10
             }
@@ -172,7 +168,7 @@ controller_loop:
                 attack_frames = controller & $0f
                 attack_held_frames = 0
             } else {
-                attack_held_frames += 1
+                attack_held_frames = 1 // prevent secondary attack for now
             }
         } else if (attack_held_frames != 0 && attack_frames == 0) {
             attack_frames = 8
@@ -321,9 +317,9 @@ controller_loop:
             }
         } else {
             if (gravity_direction) { // apply gravity
-                vel_y -= $20
+                vel_y -= $40
             } else {
-                vel_y += $20
+                vel_y += $40
             }
             if (vel_x > 0) { // apply drag/friction
                 if (hi(vel_x) & $80 != 0) {
@@ -343,17 +339,19 @@ controller_loop:
             }
         }
         if (player_x - scroll_x < $60) { // scroll forwards 60
-            if (player_x - scroll_x <= $38) { // 38
-                scroll_x -= 8
-            } else {
-                scroll_x -= 2
-            }
+            //if (player_x - scroll_x <= $38) { // 38
+            //    scroll_x -= 8
+            //} else {
+            //    scroll_x -= 2
+            //}
+            scroll_x = player_x - $60
         } else if (player_x - scroll_x > $a0) { // backwards // a0
-            if (player_x - scroll_x >= $c8)  { // c8
-                scroll_x += 8
-            } else {
-                scroll_x += 2
-            }
+            //if (player_x - scroll_x >= $c8)  { // c8
+            //    scroll_x += 8
+            //} else {
+            //    scroll_x += 2
+            //}
+            scroll_x = player_x - $a0
         }
         if (hi(scroll_x) & $80 != 0) { // no scrolling off the left edge 
             scroll_x = 0
@@ -381,18 +379,31 @@ controller_loop:
             if (enemy_flags[j] & $80 != 0 && (hi(scroll_x-enemy_xs[i]) == 0 || hi(scroll_x-enemy_xs[i]) == $ff)) {
                 call(enemy_funcs[j], i)
             }
-            // todo: cache player_x - enemy_xs[i] and also make this less hacky
-            if (enemy_flags[j] & $40 != 0 && (hi(player_x - enemy_xs[i]) == 0 || hi(player_x - enemy_xs[i]) == $ff)) {
-                if (lo(player_x - enemy_xs[i]) > sbyte(-16) && lo(player_x - enemy_xs[i]) < sbyte((enemy_hitboxes[j] & $f0) >> 1)) {
-                    if (player_y - enemy_ys[i] > sbyte(-16) && (player_y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
-                        if (dash_frames & $7f != 0) {
-                            if (enemy_healths[i] != 0) {
-                                enemy_healths[i] -= 1
-                            }
-                            dash_frames &= $7f
-                        } else {
-                            call(enemy_cfuncs[j], i)
+            // todo: see if i can get it done better in general
+            breakpt = 1 
+            // compiler's broken so i gotta use inline asm
+            
+            asm {
+                LDA main$i
+                ASL
+                TAY
+                LDA player_x
+                SEC
+                SBC $B2, Y
+                STA $EB
+                LDA player_x + 1
+                SBC $B3, Y
+                STA $EC
+            }
+            if ((hi(l) == $ff && lo(l) > -16) || (hi(l) == 0 && lo(l) < (enemy_hitboxes[j] & $f0) >> 1)) {
+                if (player_y - enemy_ys[i] > sbyte(-16) && (player_y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
+                    if (dash_frames & $7f != 0) {
+                        if (enemy_healths[i] != 0) {
+                            enemy_healths[i] -= 1
                         }
+                        dash_frames &= $7f
+                    } else if (enemy_flags[j] & $40 != 0) {
+                        call(enemy_cfuncs[j], i)
                     }
                 }
             }
@@ -799,12 +810,12 @@ void update_oam_list() { // draw all metasprites to oam
         }
     }
     for i,0,until,enemy_count {
-        if (hi(enemy_xs[i]-scroll_x) == 0 && enemy_flags[enemy_types[i]] & $20 == 0) {
-            if (enemy_data2[i] & $80 != 0) {
-                j = 8
-            } else {
-                j = 0
-            }
+        if (enemy_data2[i] & $80 != 0) {
+            j = 8
+        } else {
+            j = 0
+        }
+        if (hi(enemy_xs[i]-scroll_x+j) == 0 && enemy_flags[enemy_types[i]] & $20 == 0) {
             draw_metasprite(lo(enemy_xs[i] - scroll_x) + j, enemy_ys[i], get_metasprite(i), (enemy_data2[i] & $80) >> 1)
         }
     }

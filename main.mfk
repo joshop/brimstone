@@ -11,10 +11,12 @@ array attrslice[8] // the attribute data for that slice
 array level_shadow[512]@$0300 // the current two screens of level data
 array oam[256]@$0200 // oam shadow
 array palette_buffer[24] // holds the palette
-array attribute_shadow[128] // attributes for level_shadow
-byte which_slice // left slice or right slice
+array attribute_shadow[128]@$0500 // attributes for level_shadow
+//byte which_slice // left slice or right slice
+byte which_slice
+byte ll_slice // leftmost loaded slice
 volatile byte breakpt // for debugging
-volatile byte nmitodo // update palette | redraw left seam | redraw right seam | unused | unused | unused | unused | nmi-finished
+volatile byte nmitodo // update palette | redraw left seam | redraw right seam | redraw full screen | unused | unused | unused | nmi-finished
 word player_x // player x in level
 byte player_y // player y in screen
 word scroll_x @ $18 // x position of the left side of the screen
@@ -72,15 +74,22 @@ array effect_flags[12]
 // D: duration (no of times to shift it)
 byte effect_count
 array(word) update_queue[16]
+array halves_loaded[4]
 byte update_queue_len
 array size_test[200]
 const array level0 @$E000 = file("level.bin") // compressed level data
 const array enemy_flags = [$d0, $d0, $a0] // has ai | has collision | invisible | vulnerable
-const array enemy_hitboxes = [$22, $22, $00] // x size : y size 
-
+const array enemy_hitboxes = [$22, $22, $00] // x size : y size
 
 // BUG TRACKER
 // detection range for the falling floor (low priority)
+// fast movement causes player to get ahead of redraw (high priority)
+//  solution: load ahead of the camera by a few slices, and
+//  lock the camera behind unloaded regions
+
+// note: should remodel "oldscroll" (change it to a "rightmost loaded slice", checked against scroll pos and updated)
+// can also be used to lock camera
+// also, change "which_slice" in a similar vein
 void main() {
     init_rw_memory()
 	ppu_ctrl = %10001000 // things disabled
@@ -90,20 +99,22 @@ void main() {
     read_level_pointers(pointer.word(level0))
     byte i,j,k
     word l @ $00EB
-    byte oldscroll
     int24 temp24
     byte temp_val
     size_test[0] = 1
     palette_buffer[0] = $10 // temporary
-    palette_buffer[3] = $00
+    palette_buffer[3] = $05 // temporary
+    palette_buffer[4] = $16 // temporary
     palette_buffer[15] = $01
     palette_buffer[16] = $21
     palette_buffer[17] = $31
     palette_buffer[18] = $05
     palette_buffer[19] = $16
     palette_buffer[20] = $36
-    redraw_screen()
-    nmitodo = $a0 // update palette and redraw right seam
+    decompress_half_asm(0)
+    decompress_half_asm(1)
+    which_slice = 0
+    nmitodo = $90 // update palette and redraw whole screen
     scroll_x = 0
     set_chr_bank(0)
     player_x = $10
@@ -115,8 +126,11 @@ void main() {
     update_queue_len = 0
     sword_out = false
     //create_enemy(2, $a0, $50)
+    ll_slice = -2
+    while (nmitodo & $10 != 0) {
+
+    }
     while (player_health != 0 && player_y < $f0) {
-        oldscroll = lo(scroll_x)
         update_oam_list()
         new_controller = controller
         asm {
@@ -286,7 +300,7 @@ controller_loop:
             } else {
                 jump_grace -= 1
             }
-        } else if (false && new_controller & $80 != 0 && dash_frames & $80 == 0 && controller & $0f != 0) { // perform dash
+        } else if (new_controller & $80 != 0 && dash_frames & $80 == 0 && controller & $0f != 0) { // perform dash
             dash_frames = $8a
             dash_direction = controller
             vel_x = 0
@@ -380,7 +394,6 @@ controller_loop:
                 call(enemy_funcs[j], i)
             }
             // todo: see if i can get it done better in general
-            breakpt = 1 
             // compiler's broken so i gotta use inline asm
             
             asm {
@@ -395,7 +408,7 @@ controller_loop:
                 SBC $B3, Y
                 STA $EC
             }
-            if ((hi(l) == $ff && lo(l) > -16) || (hi(l) == 0 && lo(l) < (enemy_hitboxes[j] & $f0) >> 1)) {
+            if ((hi(l) == $ff && lo(l) > $f0) || (hi(l) == 0 && lo(l) < (enemy_hitboxes[j] & $f0) >> 1)) {
                 if (player_y - enemy_ys[i] > sbyte(-16) && (player_y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
                     if (dash_frames & $7f != 0) {
                         if (enemy_healths[i] != 0) {
@@ -417,25 +430,49 @@ controller_loop:
                 i += 1
             }
         }
-        if ((oldscroll >> 4) == ((lo(scroll_x) >> 4) + 1) & $f) { // if we need to draw one of the slices
+        i = lo(scroll_x >> 4) - ll_slice // todo fix this shit
+        // also sign stuff
+        // (oldscroll >> 4) == ((lo(scroll_x) >> 4) + 1) & $f
+        // (oldscroll >> 4) == ((lo(scroll_x) >> 4) - 1) & $f
+        if (i > 2) { // if we need to draw one of the slices
             nmitodo |= $40
-        } else if ((oldscroll >> 4) == ((lo(scroll_x) >> 4) - 1) & $f) {
+            //i = lo((scroll_x >> 4)) - 1
+            //if (i & $80 != 0) {
+            //    i = $1f
+            //}
+            //which_slice = i & 31
+
+        } else if (i != 2) {
             nmitodo |= $20
+            //i = lo((scroll_x >> 4)) + 16
+            //which_slice = i & 31
         }
-        if (nmitodo & $40 != 0) { // decompress it first
-            i = lo((scroll_x >> 4)) - 1
-            if (i & $80 != 0) {
-                i = $1f
+        //if (nmitodo & $40 != 0) { // decompress it first
+        //    i = lo((scroll_x >> 4)) - 1
+        //    if (i & $80 != 0) {
+        //        i = $1f
+        //    }
+        //    decompress_and_draw(i)
+        //    copy_slice_buffer(i)
+        //    which_slice = i & 31
+        //}
+        //if (nmitodo & $20 != 0) { // likewise
+        //    i = lo((scroll_x >> 4)) + 16
+        //    decompress_and_draw(i)
+        //    copy_slice_buffer(i)
+        //    which_slice = i & 31
+        //}
+        i = (hi(scroll_x + 32) << 1) // the 32 is here for testing and debug
+        if (lo(scroll_x + 32) & $80 != 0) {
+            i |= 1
+        }
+        if (halves_loaded[(i + 2) & 3] != i + 2) {
+            decompress_half_asm(i + 2)
+            if (i == 0) {
+                nmitodo |= $20
             }
-            decompress_and_draw(i)
-            copy_slice_buffer(i)
-            which_slice = i & 31
-        }
-        if (nmitodo & $20 != 0) { // likewise
-            i = lo((scroll_x >> 4)) + 16
-            decompress_and_draw(i)
-            copy_slice_buffer(i)
-            which_slice = i & 31
+        } else if (i > 0 && halves_loaded[(i - 1) & 3] != i - 1) {
+            decompress_half_asm(i - 1)
         }
         animation_timer += 1
         nmitodo |= 1
@@ -711,6 +748,7 @@ void draw_metasprite(byte x, byte y, byte type, byte flip) { // draw metasprite 
         } else {
             oam[oam_index] = y-metasprite[1]
         }
+        oam[oam_index] -= 1
         oam_index += 1
         oam[oam_index] = metasprite[2]
         oam_index += 1
@@ -930,77 +968,29 @@ void nmi() {
         ppu_write_data(palette_buffer[23])
         nmitodo &= $7f
     }
-    if (nmitodo & $60 != 0 && not(decompressing) || whichnmi != 0) { // draw a slice 
-        // THIS IS ALL COMMENTED OUT
-        #if 0
+    if (nmitodo & $70 != 0 && not(decompressing) || whichnmi != 0) { // draw a slice 
         ppu_ctrl = %00001100
-        side = nmitodo & $40 != 0
-        if (side) {
-            tempaddr = $2000 + ((((scroll_x >> 4) - 1) & $1f) << 1)
-        } else {
-            tempaddr = $2000 + ((((scroll_x >> 4) + 16) & $1f) << 1)
-        }
-        if (lo(tempaddr) >= $20) {
-            tempaddr += $400 - $20
-        }
         if (whichnmi == 0) {
-            ppu_set_addr(tempaddr)
-            for i,0,until,14 {
-                ppu_write_data(metadata0[slice[i]])
-                ppu_write_data(metadata2[slice[i]])
+            if (nmitodo & $20 != 0) {
+                which_slice = ll_slice-1
+                ll_slice -= 1
+            } else if (nmitodo & $40 != 0) {
+                which_slice = ll_slice+20
+                ll_slice += 1
             }
-            whichnmi += 1
+            which_slice &= $1f
+            breakpt = which_slice
             nmitodo &= $9f
-        } else if (whichnmi == 1) {
-            ppu_set_addr(tempaddr + 1)
-            for i,0,until,14 {
-                ppu_write_data(metadata1[slice[i]])
-                ppu_write_data(metadata3[slice[i]])
-            }
-            whichnmi = 2
-        } else if (whichnmi == 2) {
-            if (side && lo(scroll_x) & $10 == 0) {
-                tempaddr = $23c0 + (((scroll_x >> 5) - 1) & $0f)
-            } else if (side) {
-                tempaddr = $23c0 + ((scroll_x >> 5) & $0f)
-            } else {
-                tempaddr = $23c0 + (((scroll_x >> 5) + 8) & $0f)
-            }
-            if (lo(tempaddr) >= $c8) {
-                tempaddr += $400 - $8
-            }
-            for i,0,until,8 {
-                ppu_set_addr(tempaddr)
-                ppu_read_data()
-                buffer[i] = ppu_read_data()
-                tempaddr += 8
-            }
-            j = 0
-            if ((lo(scroll_x) & $10 == 0 && not(side)) || (lo(scroll_x) & $10 != 0 && side)) {
-                tempval = $cc
-            } else {
-                tempval = $33
-            }
-            for i,7,downto,0 {
-                tempaddr -= 8
-                ppu_set_addr(tempaddr)
-                ppu_write_data((buffer[i] & tempval) | attrslice[i])
-            }
-            whichnmi = 0
-        }
-        #endif
-        // END COMMENTED SECTION
-        ppu_ctrl = %00001100
-        nmitodo &= $9f
-        if (whichnmi == 0) {
             if (which_slice & 16 == 0) {
                 ppu_set_addr($2000 | (which_slice << 1))
             } else {
                 ppu_set_addr($2400 | ((which_slice & 15) << 1))
             }
+            tempaddr = level_shadow.addr + which_slice
             for i,0,until,15 {
-                ppu_write_data(metadata0[slice[i]])
-                ppu_write_data(metadata2[slice[i]])
+                ppu_write_data(metadata0[pointer(tempaddr)[0]])
+                ppu_write_data(metadata2[pointer(tempaddr)[0]])
+                tempaddr += 32
             }
             whichnmi += 1
         } else if (whichnmi == 1) {
@@ -1009,9 +999,11 @@ void nmi() {
             } else {
                 ppu_set_addr($2400 | (((which_slice & 15) << 1) | 1))
             }
+            tempaddr = level_shadow.addr + which_slice
             for i,0,until,15 {
-                ppu_write_data(metadata1[slice[i]])
-                ppu_write_data(metadata3[slice[i]])
+                ppu_write_data(metadata1[pointer(tempaddr)[0]])
+                ppu_write_data(metadata3[pointer(tempaddr)[0]])
+                tempaddr += 32
             }
             whichnmi += 1
         } else {
@@ -1028,6 +1020,12 @@ void nmi() {
                 tempval += 16 // was 8
             }
             whichnmi = 0
+            if (nmitodo & $10 != 0) {
+                which_slice += 1
+                if (which_slice == 18) {
+                    nmitodo &= $ef
+                }
+            }
         }
     } else if (update_queue_len != 0) {
         i = update_queue_len - 1
@@ -1052,311 +1050,694 @@ void nmi() {
     } else {
         ppu_ctrl = %10001001
     }
-    if (player_health == 1) {
+    if (nmitodo & $10 != 0) {
+        ppu_mask = %00000110
+    } else if (player_health == 1) {
 	    ppu_mask = %00111110
     } else {
-        if (attack_frames > 16) {
-            ppu_mask = %10011110
-        } else if (sword_out) {
-            ppu_mask = %01011110 
-        } else {
-            ppu_mask = %00011110
-        }
+        ppu_mask = %00011110
     }
     nmitodo &= $fe // mark finished bit
 }
-void decompress_and_draw(byte slice_x) { // decompress an x position and write it to the buffer
+void decompress_half_asm(byte half_idx) {
+    // optimizations on this can include alignment stuff
+    // and extracting reused code
+    // more intellectual optimizations:
+    //
+    // idea of a "next screen" byte/info somewhere (like in SMB) that moves a two-screen window forwards
+    // how to compute/store?
+    // next screen should happen right after the last occurrence on any screen
+    // options
+    // storing it in ROM with a special movement code would take 32 bytes per level more or less
+    // storing it in RAM would take also 32 bytes, and would require a precalculation
+    // ROM total would be 256 bytes if i include 8 levels as a baseline
+    // RAM would be okay, but would also add ROM for a precalculation routine
+    // levels could be prefixed with a 32B table that includes the number of commands to start with on each screen
+    // precalc routine would require deduction of sizes of things but would be overall straightforward
+    // overall conclusion:
+    // either 256B ROM and very little RAM
+    // or somewhat less than 256B ROM and 32B RAM
+    byte half_lo
+    byte i,j
+    byte xsize, ysize
+    byte left,right
+    pointer drawing_to
+    pointer prev_drawing_to
     byte current_x, current_y, objs_left
     pointer current_obj
     byte cur_header
     byte temp
     pointer patptr
-    byte xsize, ysize
-    byte i,j
-    byte xloop, yloop
-    decompressing = true // so that it doesn't try to draw it yet
-    for i,0,until,16 {
-        slice[i] = 0 // default
-    }
-    current_obj = leveldata + 1
-    objs_left = leveldata[0] // first byte is count
-    current_x = 0
-    current_y = 0
     asm {
-        JSR label(main_loop_asm)
+        ?LDA #$01
+        ?STA decompressing
+        ?LDA half_idx
+        ?AND #$03
+        ?STA half_lo
+        ?ASL
+        ?ASL
+        ?ASL
+        ?STA drawing_to
+        ?LDA #hi(level_shadow)
+        ?STA drawing_to+1
+        ?LDY #$0
+        ?LDX #$0
+    level_shadow_clear_loop:
+        ?LDA #$0
+        ?STA (drawing_to), Y
+        ?INC drawing_to
+        ?BNE level_shadow_clear_skip1
+        ?INC drawing_to+1
+    level_shadow_clear_skip1:
+        ?LDA drawing_to
+        ?AND #$7
+        ?BNE level_shadow_clear_skip2
+        ?LDA drawing_to
+        ?CLC
+        ?ADC #$18
+        ?STA drawing_to
+        ?BCC level_shadow_clear_skip2
+        ?INC drawing_to+1
+    level_shadow_clear_skip2:
+        ?INX
+        ?BPL level_shadow_clear_loop
+        ?LDA leveldata+1
+        ?STA current_obj+1
+        ?LDX leveldata
+        ?INX
+        ?BNE current_obj_skip1
+        ?INC current_obj+1
+    current_obj_skip1:
+        ?STX current_obj
+        ?LDA (leveldata), Y
+        ?STA objs_left
+        ?STY current_x
+        ?STY current_y
+        ?JSR main_loop_asm2
+        ?LDA #$00
+        ?STA decompressing
+        ?LDX half_lo
+        ?LDA half_idx
+        ?STA halves_loaded,X
+        ?LDA #hi(attribute_shadow)
+        ?STA drawing_to+1
+        ?LDA half_lo
+        ?ASL
+        ?ASL
+        ?TAX
+        ?ADC #lo(attribute_shadow)
+        ?STA drawing_to
+        ?LDA #hi(level_shadow)
+        ?STA prev_drawing_to+1
+        ?TXA
+        ?ASL
+        ?ADC #lo(level_shadow)
+        ?STA prev_drawing_to
+        ?LDX #$0
+    attr_loop1:
+        ?LDY #$21
+        ?LDA (prev_drawing_to), Y
+        ?TAY
+        ?LDA (metadata4), Y
+        ?LSR
+        ?ROR
+        ?ROR
+        ?STA temp
+        ?LDY #$20
+        ?LDA (prev_drawing_to), Y
+        ?TAY
+        ?LDA (metadata4), Y
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ORA temp
+        ?STA temp
+        ?LDY #$1
+        ?LDA (prev_drawing_to), Y
+        ?TAY
+        ?LDA (metadata4), Y
+        ?ASL
+        ?ASL
+        ?ORA temp
+        ?STA temp
+        ?LDY #$0
+        ?LDA (prev_drawing_to), Y
+        ?TAY
+        ?LDA (metadata4), Y
+        ?LDY #$0
+        ?ORA temp
+        ?STA (drawing_to), Y
+        ?INC drawing_to
+        ?LDY #$2
+        ?LDA drawing_to
+        ?AND #$3
+        ?CLC
+        ?BNE attr_skip1
+        ?LDA drawing_to
+        ?ADC #12
+        ?STA drawing_to
+        ?LDY #58
+    attr_skip1:
+        ?TYA
+        ?ADC prev_drawing_to
+        ?STA prev_drawing_to
+        ?BCC attr_skip2
+        ?INC prev_drawing_to+1
+    attr_skip2:
+        ?INX
+        ?CPX #$20
+        ?BNE attr_loop1
+        ?RTS
+    main_loop_asm2:
+        ?LDA objs_left
+        ?BNE objs_left_skip1
+        ?RTS
+    objs_left_skip1:
+        ?DEC objs_left
+        ?LDY #$00
+        ?LDA (current_obj), Y
+        ?STA cur_header
+        ?AND #%11000000
+        ?CMP #%01000000
+        ?BNE movement_cmd_skip1
+        ?LDA cur_header
+        ?AND #%00111111
+        ?BEQ movement_cmd_skip1
+        ?AND #%00111000
+        ?LSR
+        ?LSR
+        ?LSR
+        ?TAX
+        ?CMP #$4
+        ?BCC movement_cmd_skip2
+        ?LDA current_x
+        ?SBC #%01000000
+        ?STA current_x
+    movement_cmd_skip2:
+        ?TXA
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ADC current_x
+        ?STA current_x
+        ?LDA cur_header
+        ?AND #%0000111
+        ?TAX
+        ?CMP #$4
+        ?BCC movement_cmd_skip3
+        ?LDA current_y
+        ?SBC #%01000000
+        ?STA current_y
+    movement_cmd_skip3:
+        ?TXA
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ADC current_y
+        ?STA current_y
+        ?INC current_obj
+        ?BNE current_obj_skip2
+        ?INC current_obj+1
+    current_obj_skip2:
+        ?JMP main_loop_asm2
+    movement_cmd_skip1:
+        ?INY
+        ?LDA (current_obj), Y
+        ?LSR
+        ?LSR
+        ?LSR
+        ?LSR
+        ?TAX
+        ?CMP #$8
+        ?BCC offset_skip1
+        ?LDA current_x
+        ?SBC #$10
+        ?STA current_x
+        ?CLC
+    offset_skip1:
+        ?TXA
+        ?ADC current_x
+        ?STA current_x
+        ?LDA (current_obj), Y
+        ?AND #%00001111
+        ?TAX
+        ?CMP #$8
+        ?BCC offset_skip2
+        ?LDA current_y
+        ?SBC #$10
+        ?STA current_y
+        ?CLC
+    offset_skip2:
+        ?TXA
+        ?ADC current_y
+        ?STA current_y
+        ?LDA cur_header
+        ?AND #%11000000
+        ?BNE point_cmd_skip1
+        ?LDA current_x
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BNE point_cmd_skip2
+        ?LDA current_x
+        ?LDX #$00
+    point_cmd_loop:
+        ?CMP enemy_tags,X
+        ?BEQ point_cmd_skip2
+        ?INX
+        ?CPX enemy_count
+        ?BNE point_cmd_loop
+        ?STA enemy_tags,X
     }
-    // will reach here once decompression done
-    if (slice_x & 1 != 0) { // assign proper attribute
-        for i,0,until,8 {
-            attrslice[i] = (metadata4[slice[(i << 1)]] << 2) | (metadata4[slice[(i << 1) + 1]] << 6)
-        }
-    } else {
-        for i,0,until,8 {
-            attrslice[i] = (metadata4[slice[(i << 1)]]) | (metadata4[slice[(i << 1) + 1]] << 4)
-        }
-    }
-    decompressing = false
+    create_enemy(cur_header & %00111111, word(current_x) << 4, current_y << 4)
     asm {
-        RTS
-        main_loop_asm:
+    point_cmd_skip2:
+        ?INC current_x
+        ?INC current_y
+        ?INC current_obj
+        ?INC current_obj
+        ?JMP main_loop_asm2
+    point_cmd_skip1:
+        ?LDA cur_header
+        ?AND #%11000000
+        ?CMP #%10000000
+        ?BEQ rect_cmd_run
+        ?JMP rect_cmd_skip1
+    rect_cmd_run:
+        ?INY
+        ?LDA (current_obj), Y
+        ?LSR
+        ?LSR
+        ?LSR
+        ?LSR
+        ?TAX
+        ?INX
+        ?STX xsize
+        ?LDA (current_obj), Y
+        ?AND #$0f
+        ?TAX
+        ?INX
+        ?STX ysize
+        ?LDA current_x
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BNE rect_cmd_skip2
+        ?LDA current_x
+        ?AND #$7
+        ?BCS rect_cmd_end1
+    rect_cmd_skip2:
+        ?BCC rect_cmd_jump
+        ?LDA current_x
+        ?CLC
+        ?ADC xsize
+        ?STA current_x
+        ?JMP rect_cmd_bail
+    rect_cmd_jump:
+        ?LDA #$0
+    rect_cmd_end1:
+        ?STA left
+        ?LDA current_x
+        ?CLC
+        ?ADC xsize
+        ?STA current_x
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BCC rect_cmd_bail
+        ?BNE rect_cmd_skip3
+        ?LDA current_x
+        ?AND #$7
+        ?BCS rect_cmd_end2
+    rect_cmd_skip3:
+        ?LDA #$8
+    rect_cmd_end2:
+        ?CMP left
+        ?BEQ rect_cmd_bail
+        ?STA right
+        ?LDA #hi(level_shadow)
+        ?STA prev_drawing_to+1
+        ?LDA half_lo
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ADC left
+        ?STA temp
+        ?LDA current_y
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ASL
+        ?BCC rect_cmd_skip4
+        ?INC prev_drawing_to+1
+        ?CLC
+    rect_cmd_skip4:
+        ?ADC temp
+        ?STA prev_drawing_to
+        ?LDA cur_header
+        ?AND #%00111111
+        ?STA cur_header
+        ?LDX left
+        ?LDY #$00
+    rect_cmd_loop1:
+        ?LDA prev_drawing_to
+        ?STA drawing_to
+        ?LDA prev_drawing_to+1
+        ?STA drawing_to+1
+        ?INC prev_drawing_to
+        ?STY j
+    rect_cmd_loop2:
+        ?LDA cur_header
+        ?STA (drawing_to), Y
+        ?LDA drawing_to
+        ?CLC
+        ?ADC #$20
+        ?STA drawing_to
+        ?BCC rect_cmd_skip5
+        ?INC drawing_to+1
+    rect_cmd_skip5:
+        ?INC j
+        ?LDA j
+        ?CMP ysize
+        ?BNE rect_cmd_loop2
+        ?INX
+        ?CPX right
+        ?BNE rect_cmd_loop1
+    rect_cmd_bail:
+        ?LDA current_y
+        ?CLC
+        ?ADC ysize
+        ?STA current_y
+        ?LDA current_obj
+        ?ADC #$03
+        ?STA current_obj
+        ?BCC rect_cmd_skip6
+        ?INC current_obj+1
+    rect_cmd_skip6:
+        ?JMP main_loop_asm2
+    rect_cmd_skip1:
+        ?LDA cur_header
+        ?AND #%11000000
+        ?CMP #%01000000
+        ?BEQ dblk_cmd_go
+        ?JMP dblk_cmd_skip1
+    dblk_cmd_go:
+        ?INY
+        ?LDA (current_obj), Y
+        ?LSR
+        ?LSR
+        ?LSR
+        ?LSR
+        ?TAX
+        ?INX
+        ?STX xsize
+        ?LDA (current_obj), Y
+        ?AND #$0f
+        ?TAX
+        ?INX
+        ?STX ysize
+        ?LDA current_x
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BEQ dblk_cmd_skip2
+        ?BCC dblk_cmd_skip2
+        ?JMP dblk_cmd_bail
+    dblk_cmd_skip2:
+        ?LDA current_obj
+        ?CLC
+        ?ADC #$03
+        ?STA current_obj
+        ?LDA #hi(level_shadow)
+        ?STA prev_drawing_to+1
+        ?LDA half_lo
+        ?ASL
+        ?ASL
+        ?ASL
+        ?STA temp
+        ?LDA current_y
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ASL
+        ?BCC dblk_cmd_skip3
+        ?INC prev_drawing_to+1
+        ?CLC
+    dblk_cmd_skip3:
+        ?ADC temp
+        ?STA prev_drawing_to
+        ?LDA half_idx
+        ?ASL
+        ?ASL
+        ?ASL
+        ?STA temp
+        ?LDA current_x
+        ?SEC
+        ?SBC temp
+        ?STA left
+        ?LDX #$0
+    dblk_cmd_loop1:
+        ?LDA prev_drawing_to+1
+        ?STA drawing_to+1
+        ?LDA prev_drawing_to
+        ?STA drawing_to
+        ?CLC
+        ?ADC #$20
+        ?STA prev_drawing_to
+        ?BCC dblk_cmd_skip4
+        ?INC prev_drawing_to+1
+    dblk_cmd_skip4:
+        ?LDA #$0
+        ?STA j
+        ?LDA left
+        ?STA right
+    dblk_cmd_loop2:
+        ?LDA right
+        ?CMP #$8
+        ?BCS dblk_cmd_skip5
+        ?LDY #$0
+        ?LDA (current_obj), Y
+        ?LDY right
+        ?STA (drawing_to), Y
+    dblk_cmd_skip5:
+        ?INC current_obj
+        ?BNE dblk_cmd_skip6
+        ?INC current_obj+1
+    dblk_cmd_skip6:
+        ?INC j
+        ?INC right
+        ?LDA j
+        ?CMP xsize
+        ?BNE dblk_cmd_loop2
+        ?INX
+        ?CPX ysize
+        ?BNE dblk_cmd_loop1
+        ?LDY #$0
+    dblk_cmd_bail:
+        ?LDA xsize
+        ?CLC
+        ?ADC current_x
+        ?STA current_x
+        ?LDA ysize
+        ?ADC current_y
+        ?STA current_y
+        ?TYA
+        ?BEQ dblk_cmd_skip7
+        ?LDA current_obj
+        ?CLC
+        ?ADC #3
+        ?STA current_obj
+        ?BCC dblk_cmd_skip8
+        ?INC current_obj+1
+    dblk_cmd_skip8:
+        ?LDA #$00
+    dblk_cmd_loop3:
+        ?LSR xsize
+        ?BCC dblk_cmd_skip9
+        ?CLC
+        ?ADC ysize
+    dblk_cmd_skip9:
+        ?ASL ysize
+        ?LDX xsize
+        ?BNE dblk_cmd_loop3
+        ?CLC
+        ?ADC current_obj
+        ?STA current_obj
+        ?BCC dblk_cmd_skip10
+        ?INC current_obj+1
+    dblk_cmd_skip10:
+    dblk_cmd_skip7:
+        ?JMP main_loop_asm2
+    dblk_cmd_skip1:
+        ?INY
+        ?LDA (current_obj), Y
+        ?ASL
+        ?TAY
+        ?LDA (patterndata), Y
+        ?STA patptr
+        ?INY
+        ?LDA (patterndata), Y
+        ?STA patptr+1
+        ?LDY #$0
+        ?LDA (patptr), Y
+        ?LSR
+        ?LSR
+        ?LSR
+        ?LSR
+        ?TAX
+        ?INX
+        ?STX xsize
+        ?LDA (patptr), Y
+        ?AND #$0f
+        ?TAX
+        ?INX
+        ?STX ysize
+        ?LDA cur_header
+        ?AND #%00111100
+        ?LSR
+        ?LSR
+        ?TAX
+        ?INX
+        ?STX left
+        ?LDA cur_header
+        ?AND #%00000011
+        ?TAX
+        ?INX
+        ?STX right
+        ?STY i
+        ?LDA current_y
+        ?PHA
+    patt_cmd_loop1:
+        ?PLA
+        ?STA current_y
+        ?PHA
+        ?LDA #$0
+        ?STA j
+    patt_cmd_loop2:
+        ?LDA current_x
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BEQ patt_cmd_skip1
+        ?BCC patt_cmd_skip1
+        ?JMP patt_cmd_bail
+    patt_cmd_skip1:
+        ?LDA current_x
+        ?SEC
+        ?ADC xsize
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BCS patt_cmd_run1
+        ?JMP patt_cmd_bail
+    patt_cmd_run1:
+        ?LDA current_x
+        ?PHA
+        ?LDA current_y
+        ?PHA
+        ?LDA current_obj
+        ?PHA
+        ?LDA current_obj+1
+        ?PHA
+        ?LDA objs_left
+        ?PHA
+        ?LDA xsize
+        ?PHA
+        ?LDA ysize
+        ?PHA
+        ?LDA j
+        ?PHA
+        ?LDA left
+        ?PHA
+        ?LDA right
+        ?PHA
+        ?LDA patptr
+        ?PHA
+        ?LDA patptr+1
+        ?PHA
+        ?LDA i
+        ?PHA
+    patt_cmd_skip2:
+        ?LDA patptr+1
+        ?STA current_obj+1
+        ?LDA patptr
+        ?CLC
+        ?ADC #2
+        ?STA current_obj
+        ?BCC patt_cmd_skip3
+        ?INC current_obj+1
+    patt_cmd_skip3:
+        ?LDY #$1
+        ?LDA (patptr), Y
+        ?AND #%01111111
+        ?STA objs_left
+        ?JSR main_loop_asm2
+        ?PLA
+        ?STA i
+        ?PLA 
+        ?STA patptr+1
+        ?PLA
+        ?STA patptr
+    patt_cmd_skip4:
+        ?PLA
+        ?STA right
+        ?PLA
+        ?STA left
+        ?PLA
+        ?STA j
+        ?PLA
+        ?STA ysize
+        ?PLA
+        ?STA xsize
+        ?PLA
+        ?STA objs_left
+        ?PLA
+        ?STA current_obj+1
+        ?PLA
+        ?STA current_obj
+        ?PLA
+        ?STA current_y
+        ?PLA
+        ?STA current_x
+    patt_cmd_bail:
+        ?LDA ysize
+        ?CLC
+        ?ADC current_y
+        ?STA current_y
+        ?INC j
+        ?LDA j
+        ?CMP right
+        ?BEQ patt_cmd_end1
+        ?JMP patt_cmd_loop2
+    patt_cmd_end1:
+        ?LDA xsize
+        ?CLC
+        ?ADC current_x
+        ?STA current_x
+        ?INC i
+        ?LDA i
+        ?CMP left
+        ?BEQ patt_cmd_end2
+        ?JMP patt_cmd_loop1
+    patt_cmd_end2:
+        ?PLA
+        ?LDA current_obj
+        ?CLC
+        ?ADC #$3
+        ?STA current_obj
+        ?BCC patt_cmd_skip5
+        ?INC current_obj+1
+    patt_cmd_skip5:
+        ?JMP main_loop_asm2
     }
-    label main_loop // call stack is used for pattern playback recursion
-    if (objs_left == 0) {
-        asm {
-            RTS
-        }
-    }
-    objs_left -= 1
-    cur_header = current_obj[0]
-    if (cur_header & %11000000 == %01000000 && cur_header & %00111111 != 0) { // movement command
-        temp = (cur_header & %00111000) >> 3
-        if (temp > 3) {
-            current_x -= 8 << 3
-        }
-        current_x += temp << 3
-        temp = cur_header & %00000111
-        if (temp > 3) {
-            current_y -= 8 << 3
-        }
-        current_y += temp << 3
-        current_obj += 1
-        goto main_loop
-    }
-    temp = current_obj[1] >> 4 // add the offset if not movement command
-    if (temp > 7) {
-        current_x -= 16
-    }
-    current_x += temp
-    temp = current_obj[1] & %00001111
-    if (temp > 7) {
-        current_y -= 16
-    }
-    current_y += temp
-    if (cur_header & %11000000 == 0) { // point command (not really?)
-        if (current_x == slice_x) { 
-            //slice[current_y] = cur_header & %00111111
-            for i,0,until,enemy_count {
-                if (enemy_tags[i] == current_x) {
-                    goto skip_enemy_spawn
-                }
-            }
-            enemy_tags[enemy_count] = current_x
-            create_enemy(cur_header & %00111111, word(current_x) << 4, current_y << 4)
-        }
-        label skip_enemy_spawn
-        current_x += 1
-        current_y += 1
-        current_obj += 2
-        goto main_loop
-    }
-    if (cur_header & %11000000 == %01000000) { // datablock command
-        xsize = (current_obj[2] >> 4) + 1
-        ysize = (current_obj[2] & %00001111) + 1
-        if (current_x <= slice_x && current_x+xsize > slice_x) {
-            current_obj += 3 + slice_x - current_x
-            for i,0,until,ysize {
-                slice[current_y] = current_obj[0]
-                current_obj += xsize
-                current_y += 1
-            }
-            current_obj -= slice_x - current_x
-            current_x += xsize
-        } else {
-            current_obj += 3 + xsize * ysize
-            current_x += xsize
-            current_y += ysize
-        }
-        goto main_loop
-    }
-    if (cur_header & %11000000 == %10000000) { // rectangle command
-        xsize = (current_obj[2] >> 4) + 1
-        ysize = (current_obj[2] & %00001111) + 1
-        if (current_x <= slice_x && current_x+xsize > slice_x) {
-            for i,0,until,ysize {
-                slice[current_y] = cur_header & %00111111
-                current_y += 1
-            }
-            current_x += xsize
-        } else {
-            current_x += xsize
-            current_y += ysize
-        }
-        current_obj += 3
-        goto main_loop
-    }
-    // it must be pattern reference
-    patptr = patterndata[current_obj[2]]
-    xsize = (patptr[0] >> 4) + 1
-    ysize = (patptr[0] & %00001111) + 1
-    xloop = ((cur_header & %00111100) >> 2) + 1
-    yloop = ((cur_header & %00000011)     ) + 1 // made a hacky fix w/o knowing how it works, so might have broken sth
-    temp = current_x
-    for i,0,until,yloop  {
-        current_x = temp
-        for j,0,until,xloop {
-            if (current_x <= slice_x && current_x + xsize > slice_x) {
-                // backup state to the stack
-                asm {
-                    LDA current_x
-                    PHA
-                    LDA current_y
-                    PHA
-                    LDA current_obj
-                    PHA
-                    LDA current_obj+1
-                    PHA
-                    LDA objs_left
-                    PHA
-                    LDA temp
-                    PHA
-                    LDA xsize
-                    PHA
-                    LDA ysize
-                    PHA
-                    LDA i
-                    PHA
-                }
-                if (patptr[1] & $80 != 0) {
-                    asm {
-                        LDA xloop
-                        PHA
-                        LDA yloop
-                        PHA
-                        LDA patptr
-                        PHA
-                        LDA patptr+1
-                        PHA
-                        LDA j
-                        PHA
-                    }
-                }
-                current_obj = patptr + 2
-                objs_left = patptr[1] & %01111111
-                asm {
-                    JSR label(main_loop_asm)
-                }
-                if (patptr[1] & $80 != 0) {
-                    asm {
-                        PLA
-                        STA j
-                        PLA
-                        STA patptr+1
-                        PLA
-                        STA patptr
-                        PLA
-                        STA yloop
-                        PLA
-                        STA xloop
-                    }
-                }
-                asm {
-                    PLA
-                    STA i
-                    PLA
-                    STA ysize
-                    PLA
-                    STA xsize
-                    PLA
-                    STA temp
-                    PLA
-                    STA objs_left
-                    PLA
-                    STA current_obj+1
-                    PLA
-                    STA current_obj
-                    PLA
-                    STA current_y
-                    PLA
-                    STA current_x 
-                }
-            }
-            current_x += xsize
-        }
-        current_y += ysize
-    }
-    current_obj += 3
-    goto main_loop
-}
-void copy_slice_buffer(byte slice_x) { // copy slice into the level and attribute shadows
-    word i
-    byte j
-    byte k
-    slice_x &= $1f
-    i = slice_x
-    for j,0,until,16 {
-        level_shadow[i] = slice[j]
-        i += 32
-    }
-    i = (slice_x >> 1)
-    //breakpt = lo(i)
-    k = 0
-    if (slice_x & 1 == 0) {
-        for j,0,until,8 {
-            attribute_shadow[i] = (metadata4[slice[k+1]] << 4) | metadata4[slice[k]] | (attribute_shadow[i] & $cc)  // buffer overflow here
-            k += 2
-            i += 16 // was 8
-        }
-    } else {
-        for j,0,until,8 {
-            attribute_shadow[i] = (metadata4[slice[k+1]] << 6) | (metadata4[slice[k]] << 2) | (attribute_shadow[i] & $33)
-            k += 2
-            i += 16 // was 8
-        }
-    }
-}
-void redraw_screen() { // redraw entire screen from compressed data
-    byte i,j
-    word tempaddr
-    array buffer[8]
-	ppu_mask = %00000000
-	ppu_ctrl = %00001100
-    scroll_x &= $ff00
-    for i,0,until,16 {
-        if (hi(scroll_x) & 1 == 0) {
-            ppu_set_addr($2000 | (i << 1))
-        } else {
-            ppu_set_addr($2400 | (i << 1))
-        }
-        decompress_and_draw(i)
-        copy_slice_buffer(i)
-        for j,0,until,15 {
-            ppu_write_data(metadata0[slice[j]])
-            ppu_write_data(metadata2[slice[j]])
-        }
-        if (hi(scroll_x) & 1 == 0) {
-            ppu_set_addr($2001 | (i << 1))
-        } else {
-            ppu_set_addr($2401 | (i << 1))
-        }
-        for j,0,until,15 {
-            ppu_write_data(metadata1[slice[j]])
-            ppu_write_data(metadata3[slice[j]])
-        }
-        if (hi(scroll_x) & 1 == 0) {
-            tempaddr = $23c0 | (i >> 1)
-        } else {
-            tempaddr = $27c0 | (i >> 1)
-        }
-        for j,0,until,8 {
-            ppu_set_addr(tempaddr)
-            ppu_read_data()
-            buffer[j] = ppu_read_data()
-            tempaddr += 8
-        }
-        if (i & 1 != 0) {
-            for j,7,downto,0 {
-                tempaddr -= 8
-                ppu_set_addr(tempaddr)
-                ppu_write_data((buffer[j] & $33) | attrslice[j])
-            }
-        } else {
-            for j,7,downto,0 {
-                tempaddr -= 8
-                ppu_set_addr(tempaddr)
-                ppu_write_data((buffer[j] & $cc) | attrslice[j])
-            }
-        }
-    }
-	ppu_ctrl = %10001000
 }
 segment(chrrom0) const array tiles@$0000 = file("bank0.chr")

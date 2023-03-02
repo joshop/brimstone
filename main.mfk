@@ -82,18 +82,11 @@ const array enemy_flags = [$d0, $d0, $a0] // has ai | has collision | invisible 
 const array enemy_hitboxes = [$22, $22, $00] // x size : y size
 
 // BUG TRACKER
-// detection range for the falling floor (low priority)
-// fast movement causes player to get ahead of redraw (high priority)
-//  solution: load ahead of the camera by a few slices, and
-//  lock the camera behind unloaded regions
 
-// note: should remodel "oldscroll" (change it to a "rightmost loaded slice", checked against scroll pos and updated)
-// can also be used to lock camera
-// also, change "which_slice" in a similar vein
 void main() {
     init_rw_memory()
 	ppu_ctrl = %10001000 // things disabled
-	ppu_mask = %00011110
+	ppu_mask = %00000110
     enemy_count = 0
     effect_count = 0
     read_level_pointers(pointer.word(level0))
@@ -101,6 +94,7 @@ void main() {
     word l @ $00EB
     int24 temp24
     byte temp_val
+    bool on_ground
     size_test[0] = 1
     palette_buffer[0] = $10 // temporary
     palette_buffer[3] = $05 // temporary
@@ -174,6 +168,7 @@ controller_loop:
         //if (new_controller & $40 != 0) { // gravity flipping
         //    gravity_direction = not(gravity_direction) 
         //}
+        on_ground = false
         if (controller & $40 != 0 && not(sword_out)) { // primary attack
             if (attack_held_frames > $20) {
                 sword_out = true
@@ -278,18 +273,17 @@ controller_loop:
                 player_y += 16
                 jump_grace = 0
             } else {
-                //jet_fuel = 30
-                jump_grace = 7
-                dash_frames = 0
+                on_ground = true
             }
             player_y &= $f0
             vel_y = 0
         } else if (solidity[level_shadow[level_idx]]) { // if on ground, replenish stuff (originally had +32)
+            on_ground = true
+        }
+        if (on_ground) {
             jump_grace = 7
-            //jet_fuel = 30
             dash_frames = 0
         }
-        
         if (jump_grace != 0) { // don't ask me how this works, it handles jumping for different heights
             if (jump_grace > 7) {
                 if (controller & $80 == 0) {
@@ -336,18 +330,27 @@ controller_loop:
                 vel_y += $40
             }
             if (vel_x > 0) { // apply drag/friction
+                // todo: optimize drag code
+                i = $3f
+                j = $c0
+                k = 2
+                //if (not(on_ground)) {
+                //    k += 1
+                //    i >>= 1
+                //    j |= $20
+                //}
                 if (hi(vel_x) & $80 != 0) {
-                    if (vel_x >> 2 == $3fff) {
+                    if (vel_x >> k == i:$ff) {
                         vel_x += 1
                     } else {
-                        vel_x -= vel_x >> 2
-                        vel_x.hi -= $c0
+                        vel_x -= vel_x >> k
+                        vel_x.hi -= j
                     }
                 } else {
-                    if (vel_x >> 2 == 0) {
+                    if (vel_x >> k == 0) {
                         vel_x -= 1
                     } else {
-                        vel_x -= vel_x >> 2
+                        vel_x -= vel_x >> k
                     }
                 }
             }
@@ -378,10 +381,10 @@ controller_loop:
             j = hi(player_x-enemy_xs[i])
             if (enemy_healths[i] == 0 || enemy_ys[i] >= $f0 || (j != 0 && j != $ff)) { // || hi(player_x-enemy_xs[i]) != 0 && hi(player_x-enemy_xs[i]) != $ff
                 label bugevade
-                destroy_enemy(i)
                 if (enemy_healths[i] == 0 && enemy_flags[enemy_types[i]] & $20 == 0) {
                     create_effect($0f, enemy_xs[i], enemy_ys[i], $20, 0)
                 }
+                destroy_enemy(i)
             //} else if (hi(player_x-enemy_xs[i]) == 0 || hi(player_x-enemy_xs[i]) == $ff) {
             //    i += 1
             } else {
@@ -411,7 +414,7 @@ controller_loop:
             if ((hi(l) == $ff && lo(l) > $f0) || (hi(l) == 0 && lo(l) < (enemy_hitboxes[j] & $f0) >> 1)) {
                 if (player_y - enemy_ys[i] > sbyte(-16) && (player_y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
                     if (dash_frames & $7f != 0) {
-                        if (enemy_healths[i] != 0) {
+                        if (enemy_healths[i] != 0 && enemy_flags[enemy_types[i]] & $10 != 0) {
                             enemy_healths[i] -= 1
                         }
                         dash_frames &= $7f
@@ -429,23 +432,6 @@ controller_loop:
             } else {
                 i += 1
             }
-        }
-        i = lo(scroll_x >> 4) - ll_slice // todo fix this shit
-        // also sign stuff
-        // (oldscroll >> 4) == ((lo(scroll_x) >> 4) + 1) & $f
-        // (oldscroll >> 4) == ((lo(scroll_x) >> 4) - 1) & $f
-        if (i > 2) { // if we need to draw one of the slices
-            nmitodo |= $40
-            //i = lo((scroll_x >> 4)) - 1
-            //if (i & $80 != 0) {
-            //    i = $1f
-            //}
-            //which_slice = i & 31
-
-        } else if (i != 2) {
-            nmitodo |= $20
-            //i = lo((scroll_x >> 4)) + 16
-            //which_slice = i & 31
         }
         //if (nmitodo & $40 != 0) { // decompress it first
         //    i = lo((scroll_x >> 4)) - 1
@@ -473,6 +459,22 @@ controller_loop:
             }
         } else if (i > 0 && halves_loaded[(i - 1) & 3] != i - 1) {
             decompress_half_asm(i - 1)
+        }
+        i = lo(scroll_x >> 4) - ll_slice // todo fix this shit
+        // also sign stuff
+        // (oldscroll >> 4) == ((lo(scroll_x) >> 4) + 1) & $f
+        // (oldscroll >> 4) == ((lo(scroll_x) >> 4) - 1) & $f
+        if (i > 2) { // if we need to draw one of the slices
+            nmitodo |= $40
+            //i = lo((scroll_x >> 4)) - 1
+            //if (i & $80 != 0) {
+            //    i = $1f
+            //}
+            //which_slice = i & 31
+        } else if (i != 2) {
+            nmitodo |= $20
+            //i = lo((scroll_x >> 4)) + 16
+            //which_slice = i & 31
         }
         animation_timer += 1
         nmitodo |= 1
@@ -683,7 +685,7 @@ void ffloor_enemy_ai(byte id) {
         update_queue_len += 1
         return
     }
-    if (player_x >= enemy_xs[id] && player_x - enemy_xs[id] < 48 && enemy_ys[id] >= player_y && enemy_ys[id] - player_y < 16) {
+    if (player_x >= enemy_xs[id] && player_x - enemy_xs[id] < 64 && enemy_ys[id] >= player_y && enemy_ys[id] - player_y < 16) {
         enemy_data1[id] += 1
     } else {
         enemy_data1[id] = 0

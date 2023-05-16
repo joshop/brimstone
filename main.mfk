@@ -16,7 +16,7 @@ array attribute_shadow[128]@$0500 // attributes for level_shadow
 byte which_slice
 byte ll_slice // leftmost loaded slice
 volatile byte breakpt // for debugging
-volatile byte nmitodo // update palette | redraw left seam | redraw right seam | redraw full screen | unused | unused | unused | nmi-finished
+volatile byte nmitodo // update palette | redraw right seam | redraw left seam | redraw full screen | unused | unused | unused | nmi-finished
 word player_x // player x in level
 byte player_y // player y in screen
 word scroll_x @ $18 // x position of the left side of the screen
@@ -99,6 +99,9 @@ void main() {
     palette_buffer[0] = $10 // temporary
     palette_buffer[3] = $05 // temporary
     palette_buffer[4] = $16 // temporary
+    palette_buffer[6] = $17
+    palette_buffer[7] = $27
+    palette_buffer[8] = $07
     palette_buffer[15] = $01
     palette_buffer[16] = $21
     palette_buffer[17] = $31
@@ -242,6 +245,9 @@ controller_loop:
             }
             player_x.lo &= $f0
             vel_x = 0
+            if (level_shadow[level_idx] == 4) { // spikes that kill you
+                player_health = 0
+            }
         }
         temp24.loword.hi = player_y // add vely to y pos
         temp24.loword.lo = sub_y
@@ -282,6 +288,9 @@ controller_loop:
         if (on_ground) {
             jump_grace = 7
             dash_frames = 0
+            if (level_shadow[level_idx] == 4 || (player_x & $0f != 0 && j == 4)) { // spikes that kill you
+                player_health = 0
+            }
         }
         if (jump_grace != 0) { // don't ask me how this works, it handles jumping for different heights
             if (jump_grace > 7) {
@@ -467,6 +476,10 @@ controller_loop:
             //which_slice = i & 31
         }
         animation_timer += 1
+        nmitodo |= 1
+        while ((nmitodo & 1) != 0) {} // wait until nmi done
+    }
+    for i,0,until,32 { // wait some frames
         nmitodo |= 1
         while ((nmitodo & 1) != 0) {} // wait until nmi done
     }
@@ -662,16 +675,16 @@ void ffloor_enemy_ai(byte id) {
     }
     if (level_shadow[level_idx+1] != $03) {
         update_queue[update_queue_len] = level_idx
-        level_shadow[level_idx] = $03
+        level_shadow[level_idx] = $02
         update_queue_len += 1
         update_queue[update_queue_len] = level_idx+1
-        level_shadow[level_idx+1] = $03
+        level_shadow[level_idx+1] = $02
         update_queue_len += 1
         update_queue[update_queue_len] = level_idx+$20
-        level_shadow[level_idx+$20] = $03
+        level_shadow[level_idx+$20] = $02
         update_queue_len += 1
         update_queue[update_queue_len] = level_idx+$21
-        level_shadow[level_idx+$21] = $03
+        level_shadow[level_idx+$21] = $02
         update_queue_len += 1
         return
     }
@@ -775,7 +788,9 @@ void draw_metasprite(byte x, byte y, byte type, byte flip) { // draw metasprite 
 }
 void update_oam_list() { // draw all metasprites to oam
     byte i,j,k
-    oam_index = 0
+    byte origin
+    origin = oam_index
+    //oam_index = 0
     if (jump_grace != 6) {
         j = 3
     } else if (vel_x == 0) {
@@ -864,10 +879,11 @@ void update_oam_list() { // draw all metasprites to oam
             draw_metasprite(lo(effect_xs[i] - scroll_x), effect_ys[i], effect_sprites[i] + j, effect_flags[i] & $c0)
         }
     }
-    while (oam_index != $00) { // fill unused sprites with ff in y
-        oam[oam_index] = $ff
-        oam_index += 4
+    while (oam_index != origin) { // fill unused sprites with ff in y
+        origin -= 4
+        oam[origin] = $ff
     }
+
 }
 byte get_metasprite(byte id) {
     // todo replace w/ return dispatch when it grows too large, or refactor this whole area
@@ -915,7 +931,7 @@ inline asm byte ppu_read_data() { // read a byte from the ppu read port
 void irq() {
 
 }
-const array(bool) solidity = [false, true, true, true, false, false, false, false] // whether each metatile is solid
+const array(bool) solidity = [false, true, true, false, true, false, false, true, true, true, true, true, false] // whether each metatile is solid
 void nmi() {
     byte i, j
     word tempaddr

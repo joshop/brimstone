@@ -1,13 +1,11 @@
 pointer leveldata // pointers to level data in rom
 pointer.pointer patterndata // array of pattern pointers
-pointer metadata0
+pointer metadata0 // pointers to each metatile data element
 pointer metadata1
 pointer metadata2
 pointer metadata3
 pointer metadata4
 pointer.pointer metaspritedata // array of metasprite pointer
-array slice[16] // current decompressed vertical slice
-array attrslice[8] // the attribute data for that slice
 array level_shadow[512]@$0300 // the current two screens of level data
 array oam[256]@$0200 // oam shadow
 array palette_buffer[24] // holds the palette
@@ -33,18 +31,18 @@ bool gravity_direction // is gravity down or up
 byte new_controller // controller data that was pressed this frame
 byte jet_fuel // frames of jetfuel left
 byte oam_index // current writing oam index
-byte player_health
-byte player_iframes
-word level_idx
-byte attack_held_frames
-byte attack_frames
-bool sword_out
-word sword_x
-byte sword_y
-bool player_facing
-byte animation_timer
-byte dash_frames
-byte dash_direction
+byte player_health // hits left
+byte player_iframes // number of invulnerability frames (player flashes)
+word level_idx // temporary used throughout code
+byte attack_held_frames // number of frames attack button held down
+byte attack_frames // for tracking the attack cycle
+bool sword_out // unused for now
+word sword_x // unused for now
+byte sword_y // unused for now
+bool player_facing // left or right facing
+byte animation_timer // unused for now
+byte dash_frames // number of frames remaining in dash cycle
+byte dash_direction // direction dashing (ctrlr buttons)
 // enemy structure:
 // 2 bytes x position
 // 1 byte y position
@@ -65,6 +63,7 @@ array effect_ys[12]
 array effect_sprites[12]
 array effect_timers[12]
 array effect_flags[12]
+// timer is the effect's lifetime, sprite is the base
 // effect flags:
 // VHBMMDDD
 // H: horiz mirror
@@ -74,9 +73,13 @@ array effect_flags[12]
 // D: duration (no of times to shift it)
 byte effect_count
 array(word) update_queue[16]
+// screen locations to be redrawn to VRAM despite not being scrolled in
+// one is done per frame, right now
 array halves_loaded[4]
+// which halves (#s) are loaded into which slots in VRAM
+// i.e. starts at 0,1,2,3, then 4,1,2,3 then 4,5,2,3 etc
 byte update_queue_len
-array size_test[200]
+array size_test[200] // early warning for when i'm hitting high ram limits
 const array level0 @$E000 = file("level.bin") // compressed level data
 const array enemy_flags = [$d0, $d0, $a0] // has ai | has collision | invisible | vulnerable
 const array enemy_hitboxes = [$22, $22, $00] // x size : y size
@@ -95,7 +98,7 @@ void main() {
     int24 temp24
     byte temp_val
     bool on_ground
-    size_test[0] = 1
+    size_test[0] = 1 // keep it compiled in
     palette_buffer[0] = $10 // temporary
     palette_buffer[3] = $05 // temporary
     palette_buffer[4] = $16 // temporary
@@ -108,7 +111,7 @@ void main() {
     palette_buffer[18] = $05
     palette_buffer[19] = $16
     palette_buffer[20] = $36
-    decompress_half_asm(0)
+    decompress_half_asm(0) // this function takes care of halves_loaded
     decompress_half_asm(1)
     which_slice = 0
     nmitodo = $90 // update palette and redraw whole screen
@@ -122,11 +125,11 @@ void main() {
     update_queue_len = 0
     sword_out = false
     //create_enemy(2, $a0, $50)
-    ll_slice = -2
-    while (nmitodo & $10 != 0) {
+    ll_slice = -2 // since there's a 2-slice buffer on each end
+    while (nmitodo & $10 != 0) { // wait until nmi performed
 
     }
-    while (player_health != 0 && player_y < $f0) {
+    while (player_health != 0 && player_y < $f0) { // death conditions: out of hp or falls into a pit
         update_oam_list()
         new_controller = controller
         asm {
@@ -142,19 +145,19 @@ controller_loop:
             BCC controller_loop
         }
         new_controller = controller & (new_controller ^ $ff) // mask out old bits
-        if (attack_held_frames == 0) {
+        if (attack_held_frames == 0) { // ie not holding attack button
             if (controller & 1 != 0) { // left and right motion
                 vel_x += $50
             } else if (controller & 2 != 0) {
                 vel_x -= $50
             }
         }
-        if (hi(vel_x) & $80 != 0) {
+        if (hi(vel_x) & $80 != 0) { // get the facing set correctly
             player_facing = true
         } else if (vel_x != 0) {
             player_facing = false
         }
-        if (controller & 4 != 0 && jet_fuel != 0) { // jetpack usage
+        if (controller & 4 != 0 && jet_fuel != 0) { // jetpack usage (unused rn)
             vel_y += $90
             jet_fuel -= 1
         } else if (controller & 8 != 0 && jet_fuel != 0) {
@@ -170,7 +173,7 @@ controller_loop:
         //if (new_controller & $40 != 0) { // gravity flipping
         //    gravity_direction = not(gravity_direction) 
         //}
-        on_ground = false
+        on_ground = false // will be set later
         if (controller & $40 != 0 && not(sword_out)) { // primary attack
             if (attack_held_frames > $20) {
                 sword_out = true
@@ -186,11 +189,11 @@ controller_loop:
             attack_held_frames = 0
             // todo attack animation
         }
-        if (attack_frames != 0 && not(sword_out)) {
+        if (attack_frames != 0 && not(sword_out)) { // melee attack code
             attack_frames -= 1
             if (attack_frames > 0) {
                 if (player_facing) {
-                    i = enemy_collision(player_x-16, player_y, 16)
+                    i = enemy_collision(player_x-16, player_y, 16) // check collision w/ weapon
                 } else {
                     i = enemy_collision(player_x+16, player_y, 16)
                 }
@@ -198,7 +201,7 @@ controller_loop:
                     enemy_healths[i] -= 1
                 }
             }
-        } else if (sword_out) {
+        } else if (sword_out) { // unused
             if (attack_frames & 1 != 0) {
                 sword_x += 3
             } else if (attack_frames & 2 != 0) {
@@ -243,7 +246,7 @@ controller_loop:
             if (hi(vel_x) & $80 != 0) {
                 player_x += 16
             }
-            player_x.lo &= $f0
+            player_x.lo &= $f0 // snap
             vel_x = 0
             if (level_shadow[level_idx] == 4) { // spikes that kill you
                 player_health = 0
@@ -251,7 +254,7 @@ controller_loop:
         }
         temp24.loword.hi = player_y // add vely to y pos
         temp24.loword.lo = sub_y
-        temp24.loword += vel_y
+        temp24.loword += vel_y // 16-bit math
         player_y = temp24.loword.hi
         sub_y = temp24.loword.lo
         level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1)
@@ -264,7 +267,7 @@ controller_loop:
             if (hi(vel_y) & $80 == 0) {
                 level_idx += 32
             }
-            if (level_idx & 31 == 31) {
+            if (level_idx & 31 == 31) { // handle wrapping
                 j = level_shadow[level_idx - 31]
             } else {
                 j = level_shadow[level_idx + 1]
@@ -274,19 +277,19 @@ controller_loop:
             }
         }
         if (k != 0) { // collision
-            if (hi(vel_y) & $80 != 0) {
+            if (hi(vel_y) & $80 != 0) { // hit from above, not on ground
                 player_y += 16
                 jump_grace = 0
             } else {
                 on_ground = true
             }
-            player_y &= $f0
+            player_y &= $f0 // snap
             vel_y = 0
         } else if (solidity[level_shadow[level_idx]]) { // if on ground, replenish stuff (originally had +32)
             on_ground = true
         }
         if (on_ground) {
-            jump_grace = 7
+            jump_grace = 7 // can jump and dash again
             dash_frames = 0
             if (level_shadow[level_idx] == 4 || (player_x & $0f != 0 && j == 4)) { // spikes that kill you
                 player_health = 0
@@ -303,17 +306,18 @@ controller_loop:
                 jump_grace -= 1
             }
         } else if (new_controller & $80 != 0 && dash_frames & $80 == 0 && controller & $0f != 0) { // perform dash
-            dash_frames = $8a
+            dash_frames = $8a // 10 frames of dashing
             dash_direction = controller
             vel_x = 0
             vel_y = 0
         }
-        if (dash_frames & $7f != 0) {
+        //dash_frames &= $7f
+        if (dash_frames & $7f != 0) { // dash in progress, upper bit is if available
             dash_frames -= 1
             if (dash_frames & 4 == 0) {
-                create_effect($0f, player_x, player_y, $10, $20)
+                create_effect($0f, player_x, player_y, $10, $20) // flame effect on dash
             }
-            if (dash_direction & $8 != 0) {
+            if (dash_direction & $8 != 0) { // don't question how it works
                 vel_y.hi -= 1
             } else if (dash_direction & $4 != 0) {
                 vel_y.hi += 1
@@ -327,11 +331,11 @@ controller_loop:
             } else {
                 vel_x = 0
             }
-            if (dash_frames & $7f == 0) {
+            if (dash_frames & $7f == 0) { // arrest velocity at end of dash
                 vel_x = 0
                 vel_y = 0
             }
-        } else {
+        } else { // no gravity while dashing
             if (gravity_direction) { // apply gravity
                 vel_y -= $40
             } else {
@@ -372,32 +376,32 @@ controller_loop:
         if (hi(scroll_x) & $80 != 0) { // no scrolling off the left edge 
             scroll_x = 0
         }
-        if (hi(scroll_x) >= $07) {
+        if (hi(scroll_x) >= $07) { // or the right edge
             scroll_x = $0700
         }
         i = 0
         while (i < enemy_count) {
-            j = hi(player_x-enemy_xs[i])
+            j = hi(player_x-enemy_xs[i]) // to find if it's too far to stay loaded
             if (enemy_healths[i] == 0 || enemy_ys[i] >= $f0 || (j != 0 && j != $ff)) { // || hi(player_x-enemy_xs[i]) != 0 && hi(player_x-enemy_xs[i]) != $ff
                 label bugevade
                 if (enemy_healths[i] == 0 && enemy_flags[enemy_types[i]] & $20 == 0) {
-                    create_effect($0f, enemy_xs[i], enemy_ys[i], $20, 0)
+                    create_effect($0f, enemy_xs[i], enemy_ys[i], $20, 0) // enemy dying from damage
                 }
                 destroy_enemy(i)
             //} else if (hi(player_x-enemy_xs[i]) == 0 || hi(player_x-enemy_xs[i]) == $ff) {
             //    i += 1
             } else {
-                i += 1
+                i += 1 // next enemy, don't increment otherwise
             }
         }
         for i,0,until,enemy_count {
             j = enemy_types[i] //  && controller & $20 != 0
             if (enemy_flags[j] & $80 != 0 && (hi(scroll_x-enemy_xs[i]) == 0 || hi(scroll_x-enemy_xs[i]) == $ff)) {
-                call(enemy_funcs[j], i)
+                call(enemy_funcs[j], i) // run enemy ai
             }
             // todo: see if i can get it done better in general
             // compiler's broken so i gotta use inline asm
-            
+            // this code finds difference in Xs and stores in l
             asm {
                 LDA main$i
                 ASL
@@ -412,13 +416,13 @@ controller_loop:
             }
             if ((hi(l) == $ff && lo(l) > $f0) || (hi(l) == 0 && lo(l) < (enemy_hitboxes[j] & $f0) >> 1)) {
                 if (player_y - enemy_ys[i] > sbyte(-16) && (player_y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
-                    if (dash_frames & $7f != 0) {
+                    if (dash_frames & $7f != 0) { // dashing overrides collision and does damage
                         if (enemy_healths[i] != 0 && enemy_flags[enemy_types[i]] & $10 != 0) {
                             enemy_healths[i] -= 1
                         }
-                        dash_frames &= $7f
+                        dash_frames &= $7f // you can dash again - mask off bit
                     } else if (enemy_flags[j] & $40 != 0) {
-                        call(enemy_cfuncs[j], i)
+                        call(enemy_cfuncs[j], i) // collision
                     }
                 }
             }
@@ -448,15 +452,16 @@ controller_loop:
         //    which_slice = i & 31
         //}
         i = (hi(scroll_x + 32) << 1) // the 32 is here for testing and debug
+        // actually, it's necessary
         if (lo(scroll_x + 32) & $80 != 0) {
             i |= 1
         }
-        if (halves_loaded[(i + 2) & 3] != i + 2) {
+        if (halves_loaded[(i + 2) & 3] != i + 2) { // if the right half is the wrong one
             decompress_half_asm(i + 2)
             if (i == 0) {
-                nmitodo |= $20
+                nmitodo |= $20 // and gotta redraw it if we're at the very start
             }
-        } else if (i > 0 && halves_loaded[(i - 1) & 3] != i - 1) {
+        } else if (i > 0 && halves_loaded[(i - 1) & 3] != i - 1) { // what abt the left half
             decompress_half_asm(i - 1)
         }
         i = lo(scroll_x >> 4) - ll_slice // todo fix this shit
@@ -476,13 +481,14 @@ controller_loop:
             //which_slice = i & 31
         }
         animation_timer += 1
-        nmitodo |= 1
+        nmitodo |= 1 // nmi needs to be done
         while ((nmitodo & 1) != 0) {} // wait until nmi done
     }
     for i,0,until,32 { // wait some frames
         nmitodo |= 1
         while ((nmitodo & 1) != 0) {} // wait until nmi done
     }
+    // reset in software
     asm {
         JMP ($FFFC)
     }

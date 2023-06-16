@@ -14,7 +14,8 @@ array attribute_shadow[128]@$0500 // attributes for level_shadow
 byte which_slice
 byte ll_slice // leftmost loaded slice
 volatile byte breakpt // for debugging
-volatile byte nmitodo // update palette | redraw right seam | redraw left seam | redraw full screen | unused | unused | unused | nmi-finished
+volatile byte nmitodo // update palette | redraw right seam | redraw left seam | redraw full screen | redraw statusbar | unused | unused | nmi-finished
+//array statusbar[32] // the tiles that comprise the status bar
 word player_x // player x in level
 byte player_y // player y in screen
 word scroll_x @ $18 // x position of the left side of the screen
@@ -71,6 +72,18 @@ array effect_flags[12]
 // B: blink
 // M: mode (00: static, 01: 2 cycle, 10: 4 cycle, 11: animation)
 // D: duration (no of times to shift it)
+array(word) dagger_xs[5]
+// TODO: make these bytes, and assume it's on player's screen
+array dagger_ys[5]
+array dagger_times[5]
+array dagger_flags[5]
+// SSXXTTTT
+// S: state
+// (00: free, 01: out, 10: recharge, 11: unavailable)
+// X: x velocity
+// (00: no x vel, 10: left, 11: right, 01: unused)
+// T: dagger type
+array dagger_yvels[5]
 byte effect_count
 array(word) update_queue[16]
 // screen locations to be redrawn to VRAM despite not being scrolled in
@@ -81,11 +94,52 @@ array halves_loaded[4]
 byte update_queue_len
 array size_test[200] // early warning for when i'm hitting high ram limits
 const array level0 @$E000 = file("level.bin") // compressed level data
-const array enemy_flags = [$d0, $d0, $a0] // has ai | has collision | invisible | vulnerable
-const array enemy_hitboxes = [$22, $22, $00] // x size : y size
+const array enemy_flags = [$d0, $d0, $a0, $d0] // has ai | has collision | invisible | vulnerable
+const array enemy_hitboxes = [$22, $22, $00, $11] // x size : y size
 
 // BUG TRACKER
 
+// level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1)
+macro asm void find_level_idx(word ref x, byte ref y, word ref idx) {
+    ?LDA x+1
+    ?LSR
+    ?LDA x
+    ?ROR
+    ?LSR
+    ?LSR
+    ?LSR
+    ?STA idx
+    ?LDA y
+    ?AND #$F0
+    ?ASL
+    ?BCC find_level_idx_skip
+    ?INC idx+1
+find_level_idx_skip:
+    ?ORA idx
+    ?STA idx
+}
+macro asm void find_level_idx_enemy(byte ref id, word ref idx) {
+    ?LDA id
+    ?ASL
+    ?TAX
+    ?LDA enemy_xs+1,X
+    ?LSR
+    ?LDA enemy_xs,X
+    ?ROR
+    ?LSR
+    ?LSR
+    ?LSR
+    ?STA idx
+    ?LDX id
+    ?LDA enemy_ys,X
+    ?AND #$F0
+    ?ASL
+    ?BCC find_level_idx_skip
+    ?INC idx+1
+find_level_idx_skip:
+    ORA idx
+    STA idx
+}
 void main() {
     init_rw_memory()
 	ppu_ctrl = %10001000 // things disabled
@@ -124,12 +178,23 @@ void main() {
     jet_fuel = 0
     update_queue_len = 0
     sword_out = false
+    dagger_flags[2] = $c0
+    dagger_flags[3] = $c0
+    dagger_flags[4] = $c0
+    dagger_flags[0] = $00
+    dagger_flags[1] = $00
+    //for i,0,until,32 {
+    //    statusbar[i] = 1
+    //}
+    //statusbar[1] = 2
     //create_enemy(2, $a0, $50)
     ll_slice = -2 // since there's a 2-slice buffer on each end
     while (nmitodo & $10 != 0) { // wait until nmi performed
 
     }
     while (player_health != 0 && player_y < $f0) { // death conditions: out of hp or falls into a pit
+        //s0h_stall()
+        //ppu_set_scroll(lo(scroll_x), 0)
         update_oam_list()
         new_controller = controller
         asm {
@@ -145,13 +210,13 @@ controller_loop:
             BCC controller_loop
         }
         new_controller = controller & (new_controller ^ $ff) // mask out old bits
-        if (attack_held_frames == 0) { // ie not holding attack button
+        //if (controller & $40 == 0) { // ie not holding attack button
             if (controller & 1 != 0) { // left and right motion
                 vel_x += $50
             } else if (controller & 2 != 0) {
                 vel_x -= $50
             }
-        }
+        //}
         if (hi(vel_x) & $80 != 0) { // get the facing set correctly
             player_facing = true
         } else if (vel_x != 0) {
@@ -174,48 +239,84 @@ controller_loop:
         //    gravity_direction = not(gravity_direction) 
         //}
         on_ground = false // will be set later
-        if (controller & $40 != 0 && not(sword_out)) { // primary attack
-            if (attack_held_frames > $20) {
-                sword_out = true
-                sword_x = player_x
-                sword_y = player_y
-                attack_frames = controller & $0f
-                attack_held_frames = 0
-            } else {
-                attack_held_frames = 1 // prevent secondary attack for now
+        if ((new_controller & $40 != 0 && controller & $f != 0)) {
+            // attempt to spawn dagger
+            for i,0,until,5 {
+                if (dagger_flags[i] & $c0 == 0) {
+                    break
+                }
             }
-        } else if (attack_held_frames != 0 && attack_frames == 0) {
-            attack_frames = 8
-            attack_held_frames = 0
-            // todo attack animation
-        }
-        if (attack_frames != 0 && not(sword_out)) { // melee attack code
-            attack_frames -= 1
-            if (attack_frames > 0) {
-                if (player_facing) {
-                    i = enemy_collision(player_x-16, player_y, 16) // check collision w/ weapon
+            if (i != 5) {
+                // spawn dagger #i
+                j = $40
+                if (controller & $2 != 0) {
+                    j |= $20
+                } else if (controller & $1 != 0) {
+                    j |= $30
+                }
+                dagger_flags[i] = j
+                dagger_xs[i] = player_x
+                dagger_ys[i] = player_y
+                // 4 pixels/frame
+                if (controller & $8 != 0) {
+                    j = -$30
+                } else if (controller & $4 != 0) {
+                    j = $30
                 } else {
-                    i = enemy_collision(player_x+16, player_y, 16)
+                    j = $00
                 }
-                if (i != $ff && enemy_healths[i] != 0 && enemy_flags[enemy_types[i]] & $10 != 0) {
-                    enemy_healths[i] -= 1
-                }
-            }
-        } else if (sword_out) { // unused
-            if (attack_frames & 1 != 0) {
-                sword_x += 3
-            } else if (attack_frames & 2 != 0) {
-                sword_x -= 3
-            }
-            if (attack_frames & 4 != 0) {
-                sword_y += 3
-            } else if (attack_frames & 8 != 0) {
-                sword_y -= 3
-            }
-            if (hi(sword_x - scroll_x) != 0 || (sword_y >= $f0)) {
-                sword_out = false
+                dagger_yvels[i] = j
+                dagger_times[i] = 0
             }
         }
+        for i,0,until,5 {
+            if (dagger_flags[i] & $c0 != $40) {
+                continue
+            }
+            step_dagger(i)
+        }
+        //if (controller & $40 != 0 && not(sword_out)) { // primary attack
+        //    if (attack_held_frames > $20) {
+        //        sword_out = true
+        //        sword_x = player_x
+        //        sword_y = player_y
+        //        attack_frames = controller & $0f
+        //        attack_held_frames = 0
+        //    } else {
+        //        attack_held_frames = 1 // prevent secondary attack for now
+        //    }
+        //} else if (attack_held_frames != 0 && attack_frames == 0) {
+        //    attack_frames = 8
+        //    attack_held_frames = 0
+        //    // todo attack animation
+        //}
+        //if (attack_frames != 0 && not(sword_out)) { // melee attack code
+        //    attack_frames -= 1
+        //    if (attack_frames != 0) {
+        //        if (player_facing) {
+        //            i = enemy_collision(player_x-16, player_y, 16) // check collision w/ weapon
+        //        } else {
+        //            i = enemy_collision(player_x+16, player_y, 16)
+        //        }
+        //        if (i != $ff && enemy_healths[i] != 0 && enemy_flags[enemy_types[i]] & $10 != 0) {
+        //            enemy_healths[i] -= 1
+        //        }
+        //    }
+        //} else if (sword_out) { // unused
+        //    if (attack_frames & 1 != 0) {
+        //        sword_x += 3
+        //    } else if (attack_frames & 2 != 0) {
+        //        sword_x -= 3
+        //    }
+        //    if (attack_frames & 4 != 0) {
+        //        sword_y += 3
+        //    } else if (attack_frames & 8 != 0) {
+        //        sword_y -= 3
+        //    }
+        //    if (hi(sword_x - scroll_x) != 0 || (sword_y >= $f0)) {
+        //        sword_out = false
+        //    }
+        //}
         temp24.hiword = player_x // code for adding velocity to position
         temp24.loword.lo = sub_x
         if (vel_x > $7fff) {
@@ -226,8 +327,10 @@ controller_loop:
         sub_x = temp24.loword.lo
         j = 0
         k = 0
+        level_idx.hi = 0
         if (vel_x != 0) {
-            level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1) // index in level shadow where tile is found
+            //level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1) // index in level shadow where tile is found
+            find_level_idx(player_x, player_y, level_idx)
             if (hi(vel_x) & $80 == 0) { // moving to right, so offset one to the right
                 if (level_idx & 31 == 31) {
                     level_idx -= 32
@@ -257,9 +360,11 @@ controller_loop:
         temp24.loword += vel_y // 16-bit math
         player_y = temp24.loword.hi
         sub_y = temp24.loword.lo
-        level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1)
+        //level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1)
         j = 0
         k = 0
+        level_idx.hi = 0
+        find_level_idx(player_x, player_y, level_idx)
         if (vel_y != 0) {
             asm {
                 CLC
@@ -305,12 +410,12 @@ controller_loop:
             } else {
                 jump_grace -= 1
             }
-        } else if (new_controller & $80 != 0 && dash_frames & $80 == 0 && controller & $0f != 0) { // perform dash
-            dash_frames = $8a // 10 frames of dashing
-            dash_direction = controller
-            vel_x = 0
-            vel_y = 0
-        }
+        }// else if (new_controller & $80 != 0 && dash_frames & $80 == 0 && controller & $0f != 0) { // perform dash
+        //    dash_frames = $8a // 10 frames of dashing
+        //    dash_direction = controller
+        //    vel_x = 0
+        //    vel_y = 0
+        //}
         //dash_frames &= $7f
         if (dash_frames & $7f != 0) { // dash in progress, upper bit is if available
             dash_frames -= 1
@@ -382,7 +487,7 @@ controller_loop:
         i = 0
         while (i < enemy_count) {
             j = hi(player_x-enemy_xs[i]) // to find if it's too far to stay loaded
-            if (enemy_healths[i] == 0 || enemy_ys[i] >= $f0 || (j != 0 && j != $ff)) { // || hi(player_x-enemy_xs[i]) != 0 && hi(player_x-enemy_xs[i]) != $ff
+            if (enemy_healths[i] == 0 || enemy_healths[i] & $80 != 0 || enemy_ys[i] >= $f0 || (j != 0 && j != $ff)) { // || hi(player_x-enemy_xs[i]) != 0 && hi(player_x-enemy_xs[i]) != $ff
                 label bugevade
                 if (enemy_healths[i] == 0 && enemy_flags[enemy_types[i]] & $20 == 0) {
                     create_effect($0f, enemy_xs[i], enemy_ys[i], $20, 0) // enemy dying from damage
@@ -453,6 +558,7 @@ controller_loop:
         //}
         i = (hi(scroll_x + 32) << 1) // the 32 is here for testing and debug
         // actually, it's necessary
+        // todo: this might be highly inefficient
         if (lo(scroll_x + 32) & $80 != 0) {
             i |= 1
         }
@@ -461,7 +567,7 @@ controller_loop:
             if (i == 0) {
                 nmitodo |= $20 // and gotta redraw it if we're at the very start
             }
-        } else if (i > 0 && halves_loaded[(i - 1) & 3] != i - 1) { // what abt the left half
+        } else if (i != 0 && halves_loaded[(i - 1) & 3] != i - 1) { // what abt the left half
             decompress_half_asm(i - 1)
         }
         i = lo(scroll_x >> 4) - ll_slice // todo fix this shit
@@ -492,6 +598,61 @@ controller_loop:
     asm {
         JMP ($FFFC)
     }
+}
+
+void step_dagger(byte i) {
+    word a
+    byte b
+    if (dagger_times[i] & $7f == $7f) {
+        dagger_times[i] &= $8f
+    }
+    b = enemy_collision(dagger_xs[i], dagger_ys[i], 8)
+    if (b != $ff && enemy_healths[b] != 0 && enemy_flags[enemy_types[b]] & $10 != 0) {
+        enemy_healths[b] -= 1
+        dagger_flags[i] = %00000000
+        return
+    }
+    dagger_times[i] += 1
+    if (dagger_flags[i] & $20 != 0) {
+        if (dagger_flags[i] & $10 == 0) {
+            dagger_xs[i] -= 3
+        } else {
+            dagger_xs[i] += 3
+        }
+    }
+    if (dagger_yvels[i] & $80 == 0) {
+        dagger_ys[i] += dagger_yvels[i] >> 4
+    } else {
+        dagger_ys[i] += $f0 | (dagger_yvels[i] >> 4)
+        // sign extend
+    }
+    if (dagger_times[i] == $0c) {
+        dagger_times[i] |= $80
+        // enable dagger gravity
+    }
+    if (dagger_times[i] & $80 != 0 && sbyte(dagger_yvels[i]) < $7c) {
+        dagger_yvels[i] += 4
+    }
+    // base dagger velocity: 4p/f
+    b = hi(dagger_xs[i]-scroll_x)
+    if (dagger_ys[i] > $f0 || (b != $00)) {
+        dagger_flags[i] = %00000000
+        return
+    }
+    a = dagger_xs[i] // weird compiler bug?
+    b = dagger_ys[i]
+    level_idx.hi = 0
+    find_level_idx(a, b, level_idx)
+    if (solidity[level_shadow[level_idx]]) {
+        dagger_flags[i] = %00000000
+        return
+    }
+    return
+    //asm {
+    //    dagger_kill:
+    //}
+    
+
 }
 void update_oam_list_old() {
     oam_index = 0
@@ -615,29 +776,44 @@ void basic_enemy_ai(byte id) {
     }
 }
 void simple_enemy_ai(byte id) { // todo: abstract out routines like enemy to wall collision
-    level_idx = (lo(enemy_xs[id] >> 4) & $1f) | (word(enemy_ys[id] & $f0) << 1)
-    if (enemy_data2[id] != 0) {
+    //level_idx = (lo(enemy_xs[id] >> 4) & $1f) | (word(enemy_ys[id] & $f0) << 1)
+    level_idx.hi = 0 // needed for find_level_idx_enemy
+    find_level_idx_enemy(id, level_idx)
+    if (enemy_data2[id] != 0) { // moving left
         enemy_xs[id] -= 1
-        if (solidity[level_shadow[level_idx]]) {
+        if (solidity[level_shadow[level_idx]]) { // reflect if hits wall
             enemy_data2[id] <<= 1
             enemy_xs[id].lo &= $f0
-            enemy_xs[id] += 16
+            enemy_xs[id] += 16 // offset for new position
         }
     } else {
-        enemy_xs[id] += 1
-        if (solidity[level_shadow[level_idx+1]]) {
+        enemy_xs[id] += 1 // move right
+        if (solidity[level_shadow[level_idx+1]]) { // reflect if hits wall
             enemy_data2[id] = $80
             enemy_xs[id].lo &= $f0
         }
     }
     level_idx += 32
-    if (enemy_data2[id] == 0) {
+    if (enemy_data2[id] == 0) { // find proper level index
         level_idx += 1
     }
     if (not(solidity[level_shadow[level_idx]])) {
-        enemy_data2[id] ^= $80
+        enemy_data2[id] ^= $80 // flip if at edge
     }
     
+}
+// new enemy ai: projectile
+void bullet_enemy_ai(byte id) {
+    if (enemy_data2[id] != 0) {
+        enemy_xs[id] -= 8
+    } else {
+        enemy_xs[id] += 8
+    }
+    level_idx.hi = 0 // needed for find_level_idx_enemy
+    find_level_idx_enemy(id, level_idx)
+    if (solidity[level_shadow[level_idx]]) {
+        enemy_healths[id] = $ff // break on walls
+    }
 }
 void prat_enemy_ai(byte id) {
     if (enemy_data1[id] & $30 == 0) {
@@ -661,7 +837,9 @@ void prat_enemy_ai(byte id) {
 void ffloor_enemy_ai(byte id) {
     // place four tiles around it
     // todo: outline setting those tiles in some way
+    // also: optimize
     level_idx = (lo(enemy_xs[id] >> 4) & $1f) | (word(enemy_ys[id] & $f0) << 1)
+    //find_level_idx(enemy_xs[id], enemy_ys[id], level_idx)
     level_idx += $21
     if (enemy_data1[id] == $40) {
         update_queue[update_queue_len] = level_idx
@@ -707,8 +885,16 @@ void basic_enemy_collide(byte id) {
     player_health -= 1
     player_iframes = 30
 }
-const array(function.byte.to.void) enemy_funcs = [simple_enemy_ai.pointer, prat_enemy_ai.pointer, ffloor_enemy_ai.pointer]
-const array(function.byte.to.void) enemy_cfuncs = [basic_enemy_collide.pointer, basic_enemy_collide.pointer, basic_enemy_collide.pointer]
+void sd_enemy_collide(byte id) {
+    basic_enemy_collide(id)
+    enemy_healths[id] = 0
+}
+// 0: simple
+// 1: rat
+// 2: floor
+// 3: bullet
+const array(function.byte.to.void) enemy_funcs = [simple_enemy_ai.pointer, prat_enemy_ai.pointer, ffloor_enemy_ai.pointer, bullet_enemy_ai.pointer]
+const array(function.byte.to.void) enemy_cfuncs = [basic_enemy_collide.pointer, basic_enemy_collide.pointer, basic_enemy_collide.pointer, sd_enemy_collide.pointer]
 void create_enemy(byte type, word x, byte y) {
     //return
     enemy_types[enemy_count] = type
@@ -745,6 +931,10 @@ void destroy_effect(byte id) {
     effect_ys[id] = effect_ys[effect_count]
     effect_timers[id] = effect_timers[effect_count]
     effect_flags[id] = effect_flags[effect_count]
+}
+void s0h_stall() {
+    while (ppu_status & $40 != 0) {}
+    while (ppu_status & $40 == 0) {}
 }
 void draw_metasprite(byte x, byte y, byte type, byte flip) { // draw metasprite at screen coordinates x, y 
     pointer metasprite
@@ -792,6 +982,7 @@ void draw_metasprite(byte x, byte y, byte type, byte flip) { // draw metasprite 
         metasprite += 4
     }
 }
+const array dagger_anim = [%00000000, %01000000, %11000000, %10000000]
 void update_oam_list() { // draw all metasprites to oam
     byte i,j,k
     byte origin
@@ -816,49 +1007,61 @@ void update_oam_list() { // draw all metasprites to oam
     if (player_iframes != 0) {
         player_iframes -= 1
     }
-    if (sword_out) { // this part needs to be refactored eventually
-        if (attack_frames & (attack_frames - 1) == 0) { // orthogonal, but maybe comparisons would be faster
-            if (attack_frames & $0c != 0) { // vertical
-                if (attack_frames == 4) {
-                    i = 8
-                    k = $80
-                } else {
-                    i = 0
-                    k = 0
-                }
-                draw_metasprite(lo(sword_x - scroll_x), sword_y + i, $0a, k)
-            } else {
-                if (attack_frames == 1) {
-                    i = 8
-                    k = $40
-                } else {
-                    i = 0
-                    k = 0
-                }
-                draw_metasprite(lo(sword_x - scroll_x) + i, sword_y, $09, k)
-            }
-        } else {
-            k = 0
-            if (attack_frames & $04 != 0) {
-                i = 8
-                k |= $80 
-            } else {
-                i = 0
-            }
-            if (attack_frames & $01 != 0) {
-                j = 8
-                k |= $40
-            } else {
-                j = 0
-            }
-            draw_metasprite(lo(sword_x - scroll_x) + i, sword_y + j, $0b, k)
+    //if (sword_out) { // this part needs to be refactored eventually
+    //    if (attack_frames & (attack_frames - 1) == 0) { // orthogonal, but maybe comparisons would be faster
+    //        if (attack_frames & $0c != 0) { // vertical
+    //            if (attack_frames == 4) {
+    //                i = 8
+    //                k = $80
+    //            } else {
+    //                i = 0
+    //                k = 0
+    //            }
+    //            draw_metasprite(lo(sword_x - scroll_x), sword_y + i, $0a, k)
+    //        } else {
+    //            if (attack_frames == 1) {
+    //                i = 8
+    //                k = $40
+    //            } else {
+    //                i = 0
+    //                k = 0
+    //            }
+    //            draw_metasprite(lo(sword_x - scroll_x) + i, sword_y, $09, k)
+    //        }
+    //    } else {
+    //        k = 0
+    //        if (attack_frames & $04 != 0) {
+    //            i = 8
+    //            k |= $80 
+    //        } else {
+    //            i = 0
+    //        }
+    //        if (attack_frames & $01 != 0) {
+    //            j = 8
+    //            k |= $40
+    //        } else {
+    //            j = 0
+    //        }
+    //        draw_metasprite(lo(sword_x - scroll_x) + i, sword_y + j, $0b, k)
+    //    }
+    //} else if (attack_frames != 0) {
+    //    if (player_facing) {
+    //        draw_metasprite(lo(player_x - scroll_x) - 8, player_y, 4 + (attack_frames >> 1), $40) // attack animation
+    //    } else {
+    //        draw_metasprite(lo(player_x - scroll_x) + 16, player_y, 4 + (attack_frames >> 1), 0)
+    //    }
+    //}
+    for i,0,until,5 {
+        if (dagger_flags[i] & $c0 != $40) {
+            continue
         }
-    } else if (attack_frames != 0) {
-        if (player_facing) {
-            draw_metasprite(lo(player_x - scroll_x) - 8, player_y, 4 + (attack_frames >> 1), $40) // attack animation
-        } else {
-            draw_metasprite(lo(player_x - scroll_x) + 16, player_y, 4 + (attack_frames >> 1), 0)
-        }
+        // dagger spin cycle
+        // 00 -> 00
+        // 01 -> 10
+        // 10 -> 11
+        // 11 -> 01
+        j = (dagger_times[i] >> 2) & 3
+        draw_metasprite(lo(dagger_xs[i] - scroll_x), dagger_ys[i], $10, dagger_anim[j])
     }
     for i,0,until,enemy_count {
         if (enemy_data2[i] & $80 != 0) {
@@ -885,11 +1088,22 @@ void update_oam_list() { // draw all metasprites to oam
             draw_metasprite(lo(effect_xs[i] - scroll_x), effect_ys[i], effect_sprites[i] + j, effect_flags[i] & $c0)
         }
     }
+    //oam[oam_index] = oam[0] // swap the old sprite zero out, we still need it!
+    //oam_index += 1
+    //oam[oam_index] = oam[1]
+    //oam_index += 1
+    //oam[oam_index] = oam[2]
+    //oam_index += 1
+    //oam[oam_index] = oam[3]
+    //oam_index += 1
     while (oam_index != origin) { // fill unused sprites with ff in y
         origin -= 4
         oam[origin] = $ff
     }
-
+    //oam[0] = 7 // and deploy the new sprite zero
+    //oam[1] = $1d
+    //oam[2] = 0
+    //oam[3] = $f7
 }
 byte get_metasprite(byte id) {
     // todo replace w/ return dispatch when it grows too large, or refactor this whole area
@@ -905,9 +1119,13 @@ byte get_metasprite(byte id) {
     if (j == 1) {
         return $0e
     }
+    if (j == 3) {
+        return $0f
+    }
     return $ff
 }
 byte enemy_collision(word x, byte y, byte size) {
+    // don't forget, this function can probably be optimized
     byte i,j
     for i,0,until,enemy_count {
         j = enemy_types[i]
@@ -993,7 +1211,6 @@ void nmi() {
                 ll_slice += 1
             }
             which_slice &= $1f
-            breakpt = which_slice
             nmitodo &= $9f
             if (which_slice & 16 == 0) {
                 ppu_set_addr($2000 | (which_slice << 1))
@@ -1001,6 +1218,9 @@ void nmi() {
                 ppu_set_addr($2400 | ((which_slice & 15) << 1))
             }
             tempaddr = level_shadow.addr + which_slice
+            //ppu_write_data($01)
+            //ppu_write_data(statusbar[(which_slice & $f) << 1])
+            //tempaddr += 32
             for i,0,until,15 {
                 ppu_write_data(metadata0[pointer(tempaddr)[0]])
                 ppu_write_data(metadata2[pointer(tempaddr)[0]])
@@ -1014,6 +1234,9 @@ void nmi() {
                 ppu_set_addr($2400 | (((which_slice & 15) << 1) | 1))
             }
             tempaddr = level_shadow.addr + which_slice
+            //ppu_write_data($01)
+            //ppu_write_data(statusbar[1 | ((which_slice & $f) << 1)])
+            //tempaddr += 32
             for i,0,until,15 {
                 ppu_write_data(metadata1[pointer(tempaddr)[0]])
                 ppu_write_data(metadata3[pointer(tempaddr)[0]])
@@ -1041,6 +1264,12 @@ void nmi() {
                 }
             }
         }
+    //} else if (nmitodo & $08 != 0) {
+    //    // redraw the status bar
+    //    ppu_set_addr($2020)
+    //    for i,0,until,32 {
+    //        ppu_write_data(statusbar[i])
+    //    }
     } else if (update_queue_len != 0) {
         i = update_queue_len - 1
         // format: 0000000I IIIIIIII, flags to add later
@@ -1059,6 +1288,7 @@ void nmi() {
         update_queue_len = i
     }
     ppu_set_scroll(lo(scroll_x),0) // scroll properly
+    //ppu_set_scroll(0,0) // not using s0h but this is for that if i end up
     if (hi(scroll_x) & 1 == 0) {
 	    ppu_ctrl = %10001000
     } else {
@@ -1147,7 +1377,7 @@ void decompress_half_asm(byte half_idx) {
         ?STA objs_left
         ?STY current_x
         ?STY current_y
-        ?JSR main_loop_asm2
+        ?JSR label(main_loop_asm2)
         ?LDA #$00
         ?STA decompressing
         ?LDX half_lo
@@ -1694,7 +1924,7 @@ void decompress_half_asm(byte half_idx) {
         ?LDA (patptr), Y
         ?AND #%01111111
         ?STA objs_left
-        ?JSR main_loop_asm2
+        ?JSR label(main_loop_asm2)
         ?PLA
         ?STA i
         ?PLA 

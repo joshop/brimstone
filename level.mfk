@@ -1,0 +1,710 @@
+pointer leveldata // pointers to level data in rom
+pointer.pointer patterndata // array of pattern pointers
+pointer metadata0 // pointers to each metatile data element
+pointer metadata1
+pointer metadata2
+pointer metadata3
+pointer metadata4
+pointer.pointer metaspritedata // array of metasprite pointer
+
+byte which_slice
+byte ll_slice // leftmost loaded slice
+
+bool decompressing // currently decompressing
+
+const array level0 @$E000 = file("level.bin") // compressed level data
+
+import ecs
+
+void read_level_pointers(pointer.word level) { // read in the level data pointers
+    leveldata = level[0]
+    metadata0 = level[1]
+    metadata1 = level[2]
+    metadata2 = level[3]
+    metadata3 = level[4]
+    metadata4 = level[5]
+    metaspritedata = pointer.pointer(level[6])
+    patterndata = pointer.pointer(level[7].pointer)
+}
+
+void decompress_half_asm(byte half_idx) {
+    // optimizations on this can include alignment stuff
+    // and extracting reused code
+    // more intellectual optimizations:
+    //
+    // idea of a "next screen" byte/info somewhere (like in SMB) that moves a two-screen window forwards
+    // how to compute/store?
+    // next screen should happen right after the last occurrence on any screen
+    // options
+    // storing it in ROM with a special movement code would take 32 bytes per level more or less
+    // storing it in RAM would take also 32 bytes, and would require a precalculation
+    // ROM total would be 256 bytes if i include 8 levels as a baseline
+    // RAM would be okay, but would also add ROM for a precalculation routine
+    // levels could be prefixed with a 32B table that includes the number of commands to start with on each screen
+    // precalc routine would require deduction of sizes of things but would be overall straightforward
+    // overall conclusion:
+    // either 256B ROM and very little RAM
+    // or somewhat less than 256B ROM and 32B RAM
+    byte half_lo
+    byte i,j
+    byte xsize, ysize
+    byte left,right
+    pointer drawing_to
+    pointer prev_drawing_to
+    byte current_x, current_y, objs_left
+    pointer current_obj
+    byte cur_header
+    byte temp
+    pointer patptr
+    asm {
+        ?LDA #$01
+        ?STA decompressing
+        ?LDA half_idx
+        ?AND #$03
+        ?STA half_lo
+        ?ASL
+        ?ASL
+        ?ASL
+        ?STA drawing_to
+        ?LDA #hi(level_shadow)
+        ?STA drawing_to+1
+        ?LDY #$0
+        ?LDX #$0
+    level_shadow_clear_loop:
+        ?LDA #$0
+        ?STA (drawing_to), Y
+        ?INC drawing_to
+        ?BNE level_shadow_clear_skip1
+        ?INC drawing_to+1
+    level_shadow_clear_skip1:
+        ?LDA drawing_to
+        ?AND #$7
+        ?BNE level_shadow_clear_skip2
+        ?LDA drawing_to
+        ?CLC
+        ?ADC #$18
+        ?STA drawing_to
+        ?BCC level_shadow_clear_skip2
+        ?INC drawing_to+1
+    level_shadow_clear_skip2:
+        ?INX
+        ?BPL level_shadow_clear_loop
+        ?LDA leveldata+1
+        ?STA current_obj+1
+        ?LDX leveldata
+        ?INX
+        ?BNE current_obj_skip1
+        ?INC current_obj+1
+    current_obj_skip1:
+        ?STX current_obj
+        ?LDA (leveldata), Y
+        ?STA objs_left
+        ?STY current_x
+        ?STY current_y
+        ?JSR label(main_loop_asm2)
+        ?LDA #$00
+        ?STA decompressing
+        ?LDX half_lo
+        ?LDA half_idx
+        ?STA halves_loaded,X
+        ?LDA #hi(attribute_shadow)
+        ?STA drawing_to+1
+        ?LDA half_lo
+        ?ASL
+        ?ASL
+        ?TAX
+        ?ADC #lo(attribute_shadow)
+        ?STA drawing_to
+        ?LDA #hi(level_shadow)
+        ?STA prev_drawing_to+1
+        ?TXA
+        ?ASL
+        ?ADC #lo(level_shadow)
+        ?STA prev_drawing_to
+        ?LDX #$0
+    attr_loop1:
+        ?LDY #$21
+        ?LDA (prev_drawing_to), Y
+        ?TAY
+        ?LDA (metadata4), Y
+        ?LSR
+        ?ROR
+        ?ROR
+        ?STA temp
+        ?LDY #$20
+        ?LDA (prev_drawing_to), Y
+        ?TAY
+        ?LDA (metadata4), Y
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ORA temp
+        ?STA temp
+        ?LDY #$1
+        ?LDA (prev_drawing_to), Y
+        ?TAY
+        ?LDA (metadata4), Y
+        ?ASL
+        ?ASL
+        ?ORA temp
+        ?STA temp
+        ?LDY #$0
+        ?LDA (prev_drawing_to), Y
+        ?TAY
+        ?LDA (metadata4), Y
+        ?LDY #$0
+        ?ORA temp
+        ?STA (drawing_to), Y
+        ?INC drawing_to
+        ?LDY #$2
+        ?LDA drawing_to
+        ?AND #$3
+        ?CLC
+        ?BNE attr_skip1
+        ?LDA drawing_to
+        ?ADC #12
+        ?STA drawing_to
+        ?LDY #58
+    attr_skip1:
+        ?TYA
+        ?ADC prev_drawing_to
+        ?STA prev_drawing_to
+        ?BCC attr_skip2
+        ?INC prev_drawing_to+1
+    attr_skip2:
+        ?INX
+        ?CPX #$20
+        ?BNE attr_loop1
+        ?RTS
+    main_loop_asm2:
+        ?LDA objs_left
+        ?BNE objs_left_skip1
+        ?RTS
+    objs_left_skip1:
+        ?DEC objs_left
+        ?LDY #$00
+        ?LDA (current_obj), Y
+        ?STA cur_header
+        ?AND #%11000000
+        ?CMP #%01000000
+        ?BNE movement_cmd_skip1
+        ?LDA cur_header
+        ?AND #%00111111
+        ?BEQ movement_cmd_skip1
+        ?AND #%00111000
+        ?LSR
+        ?LSR
+        ?LSR
+        ?TAX
+        ?CMP #$4
+        ?BCC movement_cmd_skip2
+        ?LDA current_x
+        ?SBC #%01000000
+        ?STA current_x
+    movement_cmd_skip2:
+        ?TXA
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ADC current_x
+        ?STA current_x
+        ?LDA cur_header
+        ?AND #%0000111
+        ?TAX
+        ?CMP #$4
+        ?BCC movement_cmd_skip3
+        ?LDA current_y
+        ?SBC #%01000000
+        ?STA current_y
+    movement_cmd_skip3:
+        ?TXA
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ADC current_y
+        ?STA current_y
+        ?INC current_obj
+        ?BNE current_obj_skip2
+        ?INC current_obj+1
+    current_obj_skip2:
+        ?JMP main_loop_asm2
+    movement_cmd_skip1:
+        ?INY
+        ?LDA (current_obj), Y
+        ?LSR
+        ?LSR
+        ?LSR
+        ?LSR
+        ?TAX
+        ?CMP #$8
+        ?BCC offset_skip1
+        ?LDA current_x
+        ?SBC #$10
+        ?STA current_x
+        ?CLC
+    offset_skip1:
+        ?TXA
+        ?ADC current_x
+        ?STA current_x
+        ?LDA (current_obj), Y
+        ?AND #%00001111
+        ?TAX
+        ?CMP #$8
+        ?BCC offset_skip2
+        ?LDA current_y
+        ?SBC #$10
+        ?STA current_y
+        ?CLC
+    offset_skip2:
+        ?TXA
+        ?ADC current_y
+        ?STA current_y
+        ?LDA cur_header
+        ?AND #%11000000
+        ?BNE point_cmd_skip1
+        ?LDA current_x
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BNE point_cmd_skip2
+        ?LDA current_x
+        ?LDX #$00
+    point_cmd_loop:
+        ?CMP enemy_tags,X
+        ?BEQ point_cmd_skip2
+        ?INX
+        ?CPX enemy_count
+        ?BNE point_cmd_loop
+        ?STA enemy_tags,X
+    }
+    create_enemy(cur_header & %00111111, word(current_x) << 4, current_y << 4)
+    asm {
+    point_cmd_skip2:
+        ?INC current_x
+        ?INC current_y
+        ?INC current_obj
+        ?INC current_obj
+        ?JMP main_loop_asm2
+    point_cmd_skip1:
+        ?LDA cur_header
+        ?AND #%11000000
+        ?CMP #%10000000
+        ?BEQ rect_cmd_run
+        ?JMP rect_cmd_skip1
+    rect_cmd_run:
+        ?INY
+        ?LDA (current_obj), Y
+        ?LSR
+        ?LSR
+        ?LSR
+        ?LSR
+        ?TAX
+        ?INX
+        ?STX xsize
+        ?LDA (current_obj), Y
+        ?AND #$0f
+        ?TAX
+        ?INX
+        ?STX ysize
+        ?LDA current_x
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BNE rect_cmd_skip2
+        ?LDA current_x
+        ?AND #$7
+        ?BCS rect_cmd_end1
+    rect_cmd_skip2:
+        ?BCC rect_cmd_jump
+        ?LDA current_x
+        ?CLC
+        ?ADC xsize
+        ?STA current_x
+        ?JMP rect_cmd_bail
+    rect_cmd_jump:
+        ?LDA #$0
+    rect_cmd_end1:
+        ?STA left
+        ?LDA current_x
+        ?CLC
+        ?ADC xsize
+        ?STA current_x
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BCC rect_cmd_bail
+        ?BNE rect_cmd_skip3
+        ?LDA current_x
+        ?AND #$7
+        ?BCS rect_cmd_end2
+    rect_cmd_skip3:
+        ?LDA #$8
+    rect_cmd_end2:
+        ?CMP left
+        ?BEQ rect_cmd_bail
+        ?STA right
+        ?LDA #hi(level_shadow)
+        ?STA prev_drawing_to+1
+        ?LDA half_lo
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ADC left
+        ?STA temp
+        ?LDA current_y
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ASL
+        ?BCC rect_cmd_skip4
+        ?INC prev_drawing_to+1
+        ?CLC
+    rect_cmd_skip4:
+        ?ADC temp
+        ?STA prev_drawing_to
+        ?LDA cur_header
+        ?AND #%00111111
+        ?STA cur_header
+        ?LDX left
+        ?LDY #$00
+    rect_cmd_loop1:
+        ?LDA prev_drawing_to
+        ?STA drawing_to
+        ?LDA prev_drawing_to+1
+        ?STA drawing_to+1
+        ?INC prev_drawing_to
+        ?STY j
+    rect_cmd_loop2:
+        ?LDA cur_header
+        ?STA (drawing_to), Y
+        ?LDA drawing_to
+        ?CLC
+        ?ADC #$20
+        ?STA drawing_to
+        ?BCC rect_cmd_skip5
+        ?INC drawing_to+1
+    rect_cmd_skip5:
+        ?INC j
+        ?LDA j
+        ?CMP ysize
+        ?BNE rect_cmd_loop2
+        ?INX
+        ?CPX right
+        ?BNE rect_cmd_loop1
+    rect_cmd_bail:
+        ?LDA current_y
+        ?CLC
+        ?ADC ysize
+        ?STA current_y
+        ?LDA current_obj
+        ?ADC #$03
+        ?STA current_obj
+        ?BCC rect_cmd_skip6
+        ?INC current_obj+1
+    rect_cmd_skip6:
+        ?JMP main_loop_asm2
+    rect_cmd_skip1:
+        ?LDA cur_header
+        ?AND #%11000000
+        ?CMP #%01000000
+        ?BEQ dblk_cmd_go
+        ?JMP dblk_cmd_skip1
+    dblk_cmd_go:
+        ?INY
+        ?LDA (current_obj), Y
+        ?LSR
+        ?LSR
+        ?LSR
+        ?LSR
+        ?TAX
+        ?INX
+        ?STX xsize
+        ?LDA (current_obj), Y
+        ?AND #$0f
+        ?TAX
+        ?INX
+        ?STX ysize
+        ?LDA current_x
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BEQ dblk_cmd_skip2
+        ?BCC dblk_cmd_skip2
+        ?JMP dblk_cmd_bail
+    dblk_cmd_skip2:
+        ?LDA current_obj
+        ?CLC
+        ?ADC #$03
+        ?STA current_obj
+        ?LDA #hi(level_shadow)
+        ?STA prev_drawing_to+1
+        ?LDA half_lo
+        ?ASL
+        ?ASL
+        ?ASL
+        ?STA temp
+        ?LDA current_y
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ASL
+        ?ASL
+        ?BCC dblk_cmd_skip3
+        ?INC prev_drawing_to+1
+        ?CLC
+    dblk_cmd_skip3:
+        ?ADC temp
+        ?STA prev_drawing_to
+        ?LDA half_idx
+        ?ASL
+        ?ASL
+        ?ASL
+        ?STA temp
+        ?LDA current_x
+        ?SEC
+        ?SBC temp
+        ?STA left
+        ?LDX #$0
+    dblk_cmd_loop1:
+        ?LDA prev_drawing_to+1
+        ?STA drawing_to+1
+        ?LDA prev_drawing_to
+        ?STA drawing_to
+        ?CLC
+        ?ADC #$20
+        ?STA prev_drawing_to
+        ?BCC dblk_cmd_skip4
+        ?INC prev_drawing_to+1
+    dblk_cmd_skip4:
+        ?LDA #$0
+        ?STA j
+        ?LDA left
+        ?STA right
+    dblk_cmd_loop2:
+        ?LDA right
+        ?CMP #$8
+        ?BCS dblk_cmd_skip5
+        ?LDY #$0
+        ?LDA (current_obj), Y
+        ?LDY right
+        ?STA (drawing_to), Y
+    dblk_cmd_skip5:
+        ?INC current_obj
+        ?BNE dblk_cmd_skip6
+        ?INC current_obj+1
+    dblk_cmd_skip6:
+        ?INC j
+        ?INC right
+        ?LDA j
+        ?CMP xsize
+        ?BNE dblk_cmd_loop2
+        ?INX
+        ?CPX ysize
+        ?BNE dblk_cmd_loop1
+        ?LDY #$0
+    dblk_cmd_bail:
+        ?LDA xsize
+        ?CLC
+        ?ADC current_x
+        ?STA current_x
+        ?LDA ysize
+        ?ADC current_y
+        ?STA current_y
+        ?TYA
+        ?BEQ dblk_cmd_skip7
+        ?LDA current_obj
+        ?CLC
+        ?ADC #3
+        ?STA current_obj
+        ?BCC dblk_cmd_skip8
+        ?INC current_obj+1
+    dblk_cmd_skip8:
+        ?LDA #$00
+    dblk_cmd_loop3:
+        ?LSR xsize
+        ?BCC dblk_cmd_skip9
+        ?CLC
+        ?ADC ysize
+    dblk_cmd_skip9:
+        ?ASL ysize
+        ?LDX xsize
+        ?BNE dblk_cmd_loop3
+        ?CLC
+        ?ADC current_obj
+        ?STA current_obj
+        ?BCC dblk_cmd_skip10
+        ?INC current_obj+1
+    dblk_cmd_skip10:
+    dblk_cmd_skip7:
+        ?JMP main_loop_asm2
+    dblk_cmd_skip1:
+        ?INY
+        ?LDA (current_obj), Y
+        ?ASL
+        ?TAY
+        ?LDA (patterndata), Y
+        ?STA patptr
+        ?INY
+        ?LDA (patterndata), Y
+        ?STA patptr+1
+        ?LDY #$0
+        ?LDA (patptr), Y
+        ?LSR
+        ?LSR
+        ?LSR
+        ?LSR
+        ?TAX
+        ?INX
+        ?STX xsize
+        ?LDA (patptr), Y
+        ?AND #$0f
+        ?TAX
+        ?INX
+        ?STX ysize
+        ?LDA cur_header
+        ?AND #%00111100
+        ?LSR
+        ?LSR
+        ?TAX
+        ?INX
+        ?STX left
+        ?LDA cur_header
+        ?AND #%00000011
+        ?TAX
+        ?INX
+        ?STX right
+        ?STY i
+        ?LDA current_y
+        ?PHA
+    patt_cmd_loop1:
+        ?PLA
+        ?STA current_y
+        ?PHA
+        ?LDA #$0
+        ?STA j
+    patt_cmd_loop2:
+        ?LDA current_x
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BEQ patt_cmd_skip1
+        ?BCC patt_cmd_skip1
+        ?JMP patt_cmd_bail
+    patt_cmd_skip1:
+        ?LDA current_x
+        ?SEC
+        ?ADC xsize
+        ?LSR
+        ?LSR
+        ?LSR
+        ?CMP half_idx
+        ?BCS patt_cmd_run1
+        ?JMP patt_cmd_bail
+    patt_cmd_run1:
+        ?LDA current_x
+        ?PHA
+        ?LDA current_y
+        ?PHA
+        ?LDA current_obj
+        ?PHA
+        ?LDA current_obj+1
+        ?PHA
+        ?LDA objs_left
+        ?PHA
+        ?LDA xsize
+        ?PHA
+        ?LDA ysize
+        ?PHA
+        ?LDA j
+        ?PHA
+        ?LDA left
+        ?PHA
+        ?LDA right
+        ?PHA
+        ?LDA patptr
+        ?PHA
+        ?LDA patptr+1
+        ?PHA
+        ?LDA i
+        ?PHA
+    patt_cmd_skip2:
+        ?LDA patptr+1
+        ?STA current_obj+1
+        ?LDA patptr
+        ?CLC
+        ?ADC #2
+        ?STA current_obj
+        ?BCC patt_cmd_skip3
+        ?INC current_obj+1
+    patt_cmd_skip3:
+        ?LDY #$1
+        ?LDA (patptr), Y
+        ?AND #%01111111
+        ?STA objs_left
+        ?JSR label(main_loop_asm2)
+        ?PLA
+        ?STA i
+        ?PLA 
+        ?STA patptr+1
+        ?PLA
+        ?STA patptr
+    patt_cmd_skip4:
+        ?PLA
+        ?STA right
+        ?PLA
+        ?STA left
+        ?PLA
+        ?STA j
+        ?PLA
+        ?STA ysize
+        ?PLA
+        ?STA xsize
+        ?PLA
+        ?STA objs_left
+        ?PLA
+        ?STA current_obj+1
+        ?PLA
+        ?STA current_obj
+        ?PLA
+        ?STA current_y
+        ?PLA
+        ?STA current_x
+    patt_cmd_bail:
+        ?LDA ysize
+        ?CLC
+        ?ADC current_y
+        ?STA current_y
+        ?INC j
+        ?LDA j
+        ?CMP right
+        ?BEQ patt_cmd_end1
+        ?JMP patt_cmd_loop2
+    patt_cmd_end1:
+        ?LDA xsize
+        ?CLC
+        ?ADC current_x
+        ?STA current_x
+        ?INC i
+        ?LDA i
+        ?CMP left
+        ?BEQ patt_cmd_end2
+        ?JMP patt_cmd_loop1
+    patt_cmd_end2:
+        ?PLA
+        ?LDA current_obj
+        ?CLC
+        ?ADC #$3
+        ?STA current_obj
+        ?BCC patt_cmd_skip5
+        ?INC current_obj+1
+    patt_cmd_skip5:
+        ?JMP main_loop_asm2
+    }
+}

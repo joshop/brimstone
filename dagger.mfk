@@ -1,0 +1,95 @@
+array(word) dagger_xs[5]
+// TODO: make these bytes, and assume it's on player's screen
+array dagger_ys[5]
+array dagger_times[5]
+array dagger_flags[5]
+// SSXXTTTT
+// S: state
+// (00: free, 01: out, 10: recharge, 11: unavailable)
+// X: x velocity
+// (00: no x vel, 10: left, 11: right, 01: unused)
+// T: dagger type
+array dagger_yvels[5]
+
+byte subweapon // top 4 bits: weapon type, bottom 4: switch cooldown
+array max_subweapons[4] // max of each subweapon
+
+// the H-flip and V-flip bits of each dagger animation frame
+const array dagger_anim = [%00000000, %01000000, %11000000, %10000000]
+
+const byte DAGGER_LIFESPAN = $7f
+const byte DAGGER_GRAVITY = $80
+const byte DAGGER_COOLDOWN = $ff
+
+const byte DAGGER_STATE = $c0
+const byte DAGGER_FREE = $00
+const byte DAGGER_OUT = $40
+const byte DAGGER_DOWN = $80
+const byte DAGGER_RECHARGE = $80
+const byte DAGGER_EXPEND = $40
+
+const byte DAGGER_UNAVAILABLE = $c0
+const byte DAGGER_XVEL = $30
+const byte DAGGER_NOXVEL = $00
+const byte DAGGER_HASXVEL = $20
+const byte DAGGER_LEFTXVEL = $20
+const byte DAGGER_RIGHTXVEL = $30
+
+const byte dagger_hitbox = 8
+const byte dagger_xvel = 3
+const byte dagger_gravity = 4
+const byte dagger_freetime = $0c
+
+void step_dagger(byte i) {
+    word a
+    byte b
+    if (dagger_times[i] & DAGGER_LIFESPAN == $7f) {
+        dagger_times[i] &= $ff ^ DAGGER_LIFESPAN // don't overflow into grav bit
+    }
+    b = enemy_collision(dagger_xs[i], dagger_ys[i], dagger_hitbox)
+    if (b != NO_COLLISION && enemy_healths[b] != 0 && enemy_flags[enemy_types[b]] & ENEMY_VULNERABLE != $00) {
+        enemy_healths[b] -= 1
+        // change from in use state to recharging
+        dagger_flags[i] += DAGGER_EXPEND
+        dagger_times[i] = DAGGER_COOLDOWN
+        return
+    }
+    dagger_times[i] += 1
+    if (dagger_flags[i] & DAGGER_HASXVEL != 0) {
+        if (dagger_flags[i] & DAGGER_XVEL == DAGGER_LEFTXVEL) {
+            dagger_xs[i] -= dagger_xvel
+        } else {
+            dagger_xs[i] += dagger_xvel
+        }
+    }
+    if (dagger_yvels[i] & NEGATIVE == 0) {
+        dagger_ys[i] += dagger_yvels[i] >> 4
+    } else {
+        dagger_ys[i] += $f0 | (dagger_yvels[i] >> 4)
+        // sign extend
+    }
+    if (dagger_times[i] == dagger_freetime) {
+        dagger_times[i] |= DAGGER_GRAVITY
+        // enable dagger gravity
+    }
+    if (dagger_times[i] & DAGGER_GRAVITY != 0 && sbyte(dagger_yvels[i]) < $7c) {
+        dagger_yvels[i] += dagger_gravity
+    }
+    // base dagger velocity: 4p/f
+    b = hi(dagger_xs[i]-scroll_x) // is on screen
+    if (dagger_ys[i] > YMAXIMUM || (b != $00)) {
+        dagger_flags[i] += DAGGER_EXPEND
+        dagger_times[i] = DAGGER_COOLDOWN
+        return
+    }
+    a = dagger_xs[i] // weird compiler bug?
+    b = dagger_ys[i]
+    level_idx.hi = 0
+    find_level_idx(a, b, level_idx)
+    if (solidity[level_shadow[level_idx]]) {
+        dagger_flags[i] += DAGGER_EXPEND
+        dagger_times[i] = DAGGER_COOLDOWN
+        return
+    }
+    return
+}

@@ -1,0 +1,153 @@
+import ecs
+
+const array enemy_flags = [
+    ENEMY_HAS_AI | ENEMY_HAS_COLLISION | ENEMY_VULNERABLE,
+    ENEMY_HAS_AI | ENEMY_HAS_COLLISION | ENEMY_VULNERABLE,
+    ENEMY_HAS_AI | ENEMY_INVISIBLE,
+    ENEMY_HAS_AI | ENEMY_HAS_COLLISION | ENEMY_VULNERABLE] // has ai | has collision | invisible | vulnerable
+const array enemy_hitboxes = [$22, $22, $00, $11] // x size : y size
+
+byte get_metasprite(byte id) {
+    // this function is hellzone, don't worry about it looking bad
+    // just kill it eventually
+    // todo replace w/ return dispatch when it grows too large, or refactor this whole area
+    byte j
+    j = enemy_types[id]
+    if (j == 0) {
+        if (lo(enemy_xs[id]) & $08 != 0) {
+            return $0c
+        } else {
+            return $0d
+        }
+    }
+    if (j == 1) {
+        return $0e
+    }
+    if (j == 3) {
+        return $0f
+    }
+    return $ff
+}
+
+void simple_enemy_ai(byte id) { // todo: abstract out routines like enemy to wall collision
+    //level_idx = (lo(enemy_xs[id] >> 4) & $1f) | (word(enemy_ys[id] & $f0) << 1)
+    level_idx.hi = 0 // needed for find_level_idx_enemy
+    find_level_idx_enemy(id, level_idx)
+    if (enemy_data2[id] != 0) { // moving left
+        enemy_xs[id] -= 1
+        if (solidity[level_shadow[level_idx]]) { // reflect if hits wall
+            enemy_data2[id] <<= 1
+            enemy_xs[id].lo &= $f0
+            enemy_xs[id] += 16 // offset for new position
+        }
+    } else {
+        enemy_xs[id] += 1 // move right
+        if (solidity[level_shadow[level_idx+1]]) { // reflect if hits wall
+            enemy_data2[id] = $80
+            enemy_xs[id].lo &= $f0
+        }
+    }
+    level_idx += 32
+    if (enemy_data2[id] == 0) { // find proper level index
+        level_idx += 1
+    }
+    if (not(solidity[level_shadow[level_idx]])) {
+        enemy_data2[id] ^= $80 // flip if at edge
+    }
+    
+}
+// new enemy ai: projectile
+void bullet_enemy_ai(byte id) {
+    if (enemy_data2[id] != 0) {
+        enemy_xs[id] -= 8
+    } else {
+        enemy_xs[id] += 8
+    }
+    level_idx.hi = 0 // needed for find_level_idx_enemy
+    find_level_idx_enemy(id, level_idx)
+    if (solidity[level_shadow[level_idx]]) {
+        enemy_healths[id] = $ff // break on walls
+    }
+}
+void prat_enemy_ai(byte id) {
+    if (enemy_data1[id] & $30 == 0) {
+        if (enemy_xs[id] > player_x) {
+            enemy_xs[id] -= 1
+        } else if (enemy_xs[id] < player_x) {
+            enemy_xs[id] += 1
+        }
+        if (enemy_ys[id] > player_y) {
+            enemy_ys[id] -= 1
+        } else if (enemy_ys[id] < player_y) {
+            enemy_ys[id] += 1
+        }
+    }
+    if (enemy_data1[id] & $80 != 0) {
+        enemy_data1[id] = 0
+    } else {
+        enemy_data1[id] += 1
+    }
+}
+void ffloor_enemy_ai(byte id) {
+    // place four tiles around it
+    // todo: outline setting those tiles in some way
+    // also: optimize
+    //level_idx = (lo(enemy_xs[id] >> 4) & $1f) | (word(enemy_ys[id] & $f0) << 1)
+    level_idx.hi = 0
+    find_level_idx_enemy(id, level_idx)
+    level_idx += $21
+    if (enemy_data1[id] == $40) {
+        update_queue[update_queue_len] = level_idx
+        level_shadow[level_idx] = $00
+        update_queue_len += 1
+        update_queue[update_queue_len] = level_idx+1
+        level_shadow[level_idx+1] = $00
+        update_queue_len += 1
+        update_queue[update_queue_len] = level_idx+$20
+        level_shadow[level_idx+$20] = $00
+        update_queue_len += 1
+        update_queue[update_queue_len] = level_idx+$21
+        level_shadow[level_idx+$21] = $00
+        update_queue_len += 1
+        enemy_healths[id] = 0
+        return
+    }
+    if (enemy_data2[id] != 0) {
+        update_queue[update_queue_len] = level_idx
+        level_shadow[level_idx] = $02
+        update_queue_len += 1
+        update_queue[update_queue_len] = level_idx+1
+        level_shadow[level_idx+1] = $02
+        update_queue_len += 1
+        update_queue[update_queue_len] = level_idx+$20
+        level_shadow[level_idx+$20] = $02
+        update_queue_len += 1
+        update_queue[update_queue_len] = level_idx+$21
+        level_shadow[level_idx+$21] = $02
+        update_queue_len += 1
+        enemy_data2[id] = 0
+        return
+    }
+    if (player_x >= enemy_xs[id] && player_x - enemy_xs[id] < 48 && enemy_ys[id] <= player_y && player_y - enemy_ys[id] < 16) {
+        enemy_data1[id] += 1
+    } else {
+        enemy_data1[id] = 0
+    }
+}
+void basic_enemy_collide(byte id) {
+    if (player_iframes != 0) {
+        return
+    }
+    player_health -= 1
+    player_iframes = 30
+}
+void sd_enemy_collide(byte id) {
+    basic_enemy_collide(id)
+    enemy_healths[id] = 0
+}
+// 0: simple
+// 1: rat
+// 2: floor
+// 3: bullet
+const array(function.byte.to.void) enemy_funcs = [simple_enemy_ai.pointer, prat_enemy_ai.pointer, ffloor_enemy_ai.pointer, bullet_enemy_ai.pointer]
+const array(function.byte.to.void) enemy_cfuncs = [basic_enemy_collide.pointer, basic_enemy_collide.pointer, basic_enemy_collide.pointer, sd_enemy_collide.pointer]

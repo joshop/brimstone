@@ -1,0 +1,226 @@
+array level_shadow[512]@$0300 // the current two screens of level data
+array attribute_shadow[128]@$0500 // attributes for level_shadow
+// palette layout:
+//  0, 1, 2 B0 Tile palettes (set per level)
+//  3, 4, 5 B1 etc.
+//  6, 7, 8 B2
+//  9,10,11 B3
+// 12,13,14 S0 Player palette
+// 15,16,17 S1 Daggers/HUD and fixed effects
+// 18,19,20 S2 Enemies 1 (set per level)
+// 21,22,23 S3 Enemies 2
+array tile_palette1[3]
+array tile_palette2[3]
+array tile_palette3[3]
+array tile_palette4[3]
+array player_palette[3]
+array dagger_palette[3]
+array enemy_palette1[3]
+array enemy_palette2[3]
+
+import level
+
+volatile byte nmitodo // update palette | redraw right seam | redraw left seam | redraw full screen | redraw statusbar | unused | unused | nmi-finished
+
+const byte NMI_UPDPAL = $80
+const byte NMI_REDRAWR = $40
+const byte NMI_REDRAWL = $20
+const byte NMI_REDRAWFULL = $10
+const byte NMI_FINISHED = $01
+
+word scroll_x @ $18 // x position of the left side of the screen
+byte whichnmi // for things that take several frames
+word level_idx // temporary used throughout code
+
+array(word) update_queue[16]
+// screen locations to be redrawn to VRAM despite not being scrolled in
+// one is done per frame, right now
+array halves_loaded[4]
+// which halves (#s) are loaded into which slots in VRAM
+// i.e. starts at 0,1,2,3, then 4,1,2,3 then 4,5,2,3 etc
+byte update_queue_len
+array size_test[200] // early warning for when i'm hitting high ram limits
+
+// level_idx = (lo(player_x >> 4) & $1f) | (word(player_y & $f0) << 1)
+macro asm void find_level_idx(word ref x, byte ref y, word ref idx) {
+    ?LDA x+1
+    ?LSR
+    ?LDA x
+    ?ROR
+    ?LSR
+    ?LSR
+    ?LSR
+    ?STA idx
+    ?LDA y
+    ?AND #$F0
+    ?ASL
+    ?BCC find_level_idx_skip
+    ?INC idx+1
+find_level_idx_skip:
+    ?ORA idx
+    ?STA idx
+}
+macro asm void find_level_idx_enemy(byte ref id, word ref idx) {
+    ?LDA id
+    ?ASL
+    ?TAX
+    ?LDA enemy_xs+1,X
+    ?LSR
+    ?LDA enemy_xs,X
+    ?ROR
+    ?LSR
+    ?LSR
+    ?LSR
+    ?STA idx
+    ?LDX id
+    ?LDA enemy_ys,X
+    ?AND #$F0
+    ?ASL
+    ?BCC find_level_idx_skip
+    ?INC idx+1
+find_level_idx_skip:
+    ORA idx
+    STA idx
+}
+
+
+inline asm byte ppu_read_data() { // read a byte from the ppu read port
+    ! LDA ppu_data
+    ? RTS
+}
+
+const array(bool) solidity = [false, true, true, false, true, false, false, true, true, true, true, true, false] // whether each metatile is solid
+void nmi() {
+    byte i, j
+    word tempaddr
+    bool side
+    byte tempval
+    array buffer[8]
+	//ppu_mask = $00
+	ppu_ctrl = PPU_SPRITE8 | PPU_BKGNT0 | PPU_SPRNT1 | PPU_HORIZIO | PPU_NT2000
+    ppu_oam_dma_write(oam.addr.hi)
+    if (nmitodo & NMI_UPDPAL != 0) { // reupdate palette from buffer
+        ppu_set_addr($3f01)
+        ppu_write_data(tile_palette1[0])
+        ppu_write_data(tile_palette1[1])
+        ppu_write_data(tile_palette1[2])
+        ppu_write_data($0f)
+        ppu_write_data(tile_palette2[0])
+        ppu_write_data(tile_palette2[1])
+        ppu_write_data(tile_palette2[2])
+        ppu_write_data($0f)
+        ppu_write_data(tile_palette3[0])
+        ppu_write_data(tile_palette3[1])
+        ppu_write_data(tile_palette3[2])
+        ppu_write_data($0f)
+        ppu_write_data(tile_palette4[0])
+        ppu_write_data(tile_palette4[1])
+        ppu_write_data(tile_palette4[2])
+        ppu_write_data($0f)
+        ppu_write_data(player_palette[0])
+        ppu_write_data(player_palette[1])
+        ppu_write_data(player_palette[2])
+        ppu_write_data($0f)
+        ppu_write_data(dagger_palette[0])
+        ppu_write_data(dagger_palette[1])
+        ppu_write_data(dagger_palette[2])
+        ppu_write_data($0f)
+        ppu_write_data(enemy_palette1[0])
+        ppu_write_data(enemy_palette1[1])
+        ppu_write_data(enemy_palette1[2])
+        ppu_write_data($0f)
+        ppu_write_data(enemy_palette2[0])
+        ppu_write_data(enemy_palette2[1])
+        ppu_write_data(enemy_palette2[2])
+        nmitodo &= ($ff ^ NMI_UPDPAL)
+    }
+    if (nmitodo & (NMI_REDRAWL | NMI_REDRAWR | NMI_REDRAWFULL) != 0 && not(decompressing) || whichnmi != 0) { // draw a slice 
+        ppu_ctrl = PPU_SPRITE8 | PPU_BKGNT0 | PPU_SPRNT1 | PPU_VERTIO | PPU_NT2000
+        if (whichnmi == 0) {
+            if (nmitodo & NMI_REDRAWL != 0) {
+                which_slice = ll_slice-1
+                ll_slice -= 1
+            } else if (nmitodo & NMI_REDRAWR != 0) {
+                which_slice = ll_slice+20
+                ll_slice += 1
+            }
+            which_slice &= $1f
+            nmitodo &= ($ff ^ (NMI_REDRAWL | NMI_REDRAWR))
+            if (which_slice & 16 == 0) {
+                ppu_set_addr($2000 | (which_slice << 1))
+            } else {
+                ppu_set_addr($2400 | ((which_slice & 15) << 1))
+            }
+            tempaddr = level_shadow.addr + which_slice
+            for i,0,until,15 {
+                ppu_write_data(metadata0[pointer(tempaddr)[0]])
+                ppu_write_data(metadata2[pointer(tempaddr)[0]])
+                tempaddr += 32
+            }
+            whichnmi += 1
+        } else if (whichnmi == 1) {
+            if (which_slice & 16 == 0) {
+                ppu_set_addr($2000 | ((which_slice << 1) | 1))
+            } else {
+                ppu_set_addr($2400 | (((which_slice & 15) << 1) | 1))
+            }
+            tempaddr = level_shadow.addr + which_slice
+            for i,0,until,15 {
+                ppu_write_data(metadata1[pointer(tempaddr)[0]])
+                ppu_write_data(metadata3[pointer(tempaddr)[0]])
+                tempaddr += 32
+            }
+            whichnmi += 1
+        } else {
+            if (which_slice & 16 == 0) {
+                tempaddr = $23c0 | (which_slice >> 1)
+            } else {
+                tempaddr = $27c0 | ((which_slice & 15) >> 1)
+            }
+            tempval = (which_slice >> 1)
+            for i,0,until,8 {
+                ppu_set_addr(tempaddr)
+                tempaddr += 8
+                ppu_write_data(attribute_shadow[tempval])
+                tempval += 16 // was 8
+            }
+            whichnmi = 0
+            if (nmitodo & NMI_REDRAWFULL != 0) {
+                which_slice += 1
+                if (which_slice == 18) {
+                    nmitodo &= ($ff ^ (NMI_REDRAWFULL))
+                }
+            }
+        }
+    } else if (update_queue_len != 0) {
+        i = update_queue_len - 1
+        // format: 0000000I IIIIIIII, flags to add later
+        if (lo(update_queue[i]) & $10 == 0) {
+            tempaddr = $2000 | ((update_queue[i] & $1ef) << 1)
+        } else {
+            tempaddr = $2400 | ((update_queue[i] & $1ef) << 1)
+        }
+        ppu_set_addr(tempaddr)
+        tempval = level_shadow[update_queue[i]]
+        ppu_write_data(metadata0[tempval])
+        ppu_write_data(metadata1[tempval])
+        ppu_set_addr(tempaddr+32)
+        ppu_write_data(metadata2[tempval])
+        ppu_write_data(metadata3[tempval])
+        update_queue_len = i
+    }
+    ppu_set_scroll(lo(scroll_x),0) // scroll properly
+    if (hi(scroll_x) & 1 == 0) {
+	    ppu_ctrl = PPU_NMIENABLE | PPU_SPRITE8 | PPU_BKGNT0 | PPU_SPRNT1 | PPU_HORIZIO | PPU_NT2000
+    } else {
+        ppu_ctrl = PPU_NMIENABLE | PPU_SPRITE8 | PPU_BKGNT0 | PPU_SPRNT1 | PPU_HORIZIO | PPU_NT2400
+    }
+    if (nmitodo & NMI_REDRAWFULL != 0) {
+        ppu_mask = PPU_L8BACKGROUND | PPU_L8SPRITES
+    } else if (player_health == 1) {
+	    ppu_mask = PPU_L8BACKGROUND | PPU_L8SPRITES | PPU_BACKGROUND | PPU_SPRITES | PPU_EMRED
+    } else {
+        ppu_mask = PPU_L8BACKGROUND | PPU_L8SPRITES | PPU_BACKGROUND | PPU_SPRITES
+    }
+    nmitodo &= ($ff ^ NMI_FINISHED) // mark finished bit
+}

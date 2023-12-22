@@ -1,0 +1,100 @@
+// enemy structure:
+// 2 bytes x position
+// 1 byte y position
+// 1 byte enemy type
+// 1 byte enemy health
+// 3 bytes of data
+array(word) enemy_xs[12] align(fast) @ $a8
+array enemy_ys[12] @ $62
+array enemy_types[12] @ $580
+array enemy_healths[12] @ $ca
+array enemy_data1[12] @ $f1
+array enemy_data2[12] @ $6f
+array enemy_data3[12] @ $1b
+array enemy_tags[12] @ $9d // meta number of spawn location
+byte enemy_count @ $9a
+array(word) effect_xs[12] @ $596
+array effect_ys[12]
+array effect_sprites[12]
+array effect_timers[12]
+array effect_flags[12]
+// timer is the effect's lifetime, sprite is the base
+// effect flags:
+// VHBMMDDD
+// H: horiz mirror
+// V: vert mirror
+// B: blink
+// M: mode (00: static, 01: 2 cycle, 10: 4 cycle, 11: animation)
+// D: duration (no of times to shift it)
+byte effect_count
+
+const byte ENEMY_HAS_AI = $80
+const byte ENEMY_HAS_COLLISION = $40
+const byte ENEMY_INVISIBLE = $20
+const byte ENEMY_VULNERABLE = $10
+
+const byte EFFECT_HFLIP = $40
+const byte EFFECT_VFLIP = $80
+const byte EFFECT_FLIP = $c0
+const byte EFFECT_BLINK = $20
+const byte EFFECT_MODE = $18
+const byte EFFECT_STATIC = $00
+const byte EFFECT_CYCLE2 = $08
+const byte EFFECT_CYCLE4 = $10
+const byte EFFECT_4ORANIM = $10
+const byte EFFECT_ANIMATE = $18
+const byte EFFECT_PERIOD = $07
+
+void create_enemy(byte type, word x, byte y) {
+    //return
+    enemy_types[enemy_count] = type
+    enemy_xs[enemy_count] = x
+    enemy_ys[enemy_count] = y
+    enemy_healths[enemy_count] = 1
+    enemy_data1[enemy_count] = 0
+    enemy_data2[enemy_count] = META_HFLIP
+    enemy_count += 1
+}
+void destroy_enemy(byte id) {
+    enemy_count -= 1
+    enemy_types[id] = enemy_types[enemy_count]
+    enemy_xs[id] = enemy_xs[enemy_count]
+    enemy_ys[id] = enemy_ys[enemy_count]
+    enemy_healths[id] = enemy_healths[enemy_count]
+    enemy_data1[id] = enemy_data1[enemy_count]
+    enemy_data2[id] = enemy_data2[enemy_count]
+    enemy_data3[id] = enemy_data3[enemy_count]
+    enemy_tags[id] = enemy_tags[enemy_count]
+}
+void create_effect(byte type, word x, byte y, byte timer, byte flags) {
+    effect_sprites[effect_count] = type
+    effect_xs[effect_count] = x
+    effect_ys[effect_count] = y
+    effect_timers[effect_count] = timer
+    effect_flags[effect_count] = flags
+    effect_count += 1
+}
+void destroy_effect(byte id) {
+    effect_count -= 1
+    effect_sprites[id] = effect_sprites[effect_count]
+    effect_xs[id] = effect_xs[effect_count]
+    effect_ys[id] = effect_ys[effect_count]
+    effect_timers[id] = effect_timers[effect_count]
+    effect_flags[id] = effect_flags[effect_count]
+}
+
+const byte NO_COLLISION = $ff
+
+byte enemy_collision(word x, byte y, byte size) {
+    // don't forget, this function can probably be optimized
+    byte i,j
+    for i,0,until,enemy_count {
+        j = enemy_types[i]
+        if (lo(x - enemy_xs[i]) > sbyte(-size) && lo(x - enemy_xs[i]) < sbyte((enemy_hitboxes[j] & $f0) >> 1)) {
+            if (y - enemy_ys[i] > sbyte(-size) && (y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
+                return i
+            }
+        }
+    }
+    return NO_COLLISION
+}

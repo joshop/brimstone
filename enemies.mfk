@@ -142,10 +142,22 @@ void ffloor_enemy_ai(byte id) {
         enemy_data1[id] = 0
     }
 }
+void knockback_player(word from_x) {
+    has_flip = true
+    on_ground = false
+    vel_y.hi = -4
+    jump_cooldown = 0
+    if (from_x > player_x) {
+        vel_x = -$130
+    } else {
+        vel_x = $130
+    }
+}
 void basic_enemy_collide(byte id) {
     if (player_iframes != 0) {
         return
     }
+    knockback_player(enemy_xs[id])
     player_health -= 1
     player_iframes = 30
 }
@@ -168,13 +180,12 @@ void pickup_collide(byte id) {
     enemy_healths[id] = 0
 }
 void platform_ai(byte id) {
-//    player_health -= 1
-    if (shunt_player(enemy_xs[id], enemy_ys[id], $22)) {
+    if (shunt_player(enemy_xs[id], enemy_ys[id]-1, $22)) {
         enemy_data3[id] |= $80
     }
-    if (jump_grace == 0 || lo(player_x - enemy_xs[id]) > sbyte(16) || lo(player_x - enemy_xs[id]) < sbyte(-16)) {
+    if (not(on_ground) || lo(player_x - enemy_xs[id]) >= sbyte(16) || lo(player_x - enemy_xs[id]) <= sbyte(-16)) {
         enemy_data3[id] &= $7f
-    } 
+    }
     enemy_data1[id] += 1
     if (enemy_data1[id] == $80) {
         enemy_data2[id] += 1

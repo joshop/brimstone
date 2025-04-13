@@ -271,6 +271,8 @@ void decompress_half_asm(byte half_idx) {
         ?CMP half_idx
         ?BNE point_cmd_skip2
         ?LDA current_x
+        ?LDX enemy_count
+        ?BEQ point_cmd_run
         ?LDX #$00
     point_cmd_loop:
         ?CMP enemy_tags,X
@@ -278,6 +280,7 @@ void decompress_half_asm(byte half_idx) {
         ?INX
         ?CPX enemy_count
         ?BNE point_cmd_loop
+    point_cmd_run:
         ?STA enemy_tags,X
         ?INY
         ?LDA (current_obj), Y

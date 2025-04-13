@@ -26,6 +26,7 @@ const byte NMI_UPDPAL = $80
 const byte NMI_REDRAWR = $40
 const byte NMI_REDRAWL = $20
 const byte NMI_REDRAWFULL = $10
+const byte NMI_BLANKSCREEN = $08
 const byte NMI_FINISHED = $01
 
 word scroll_x @ $18 // x position of the left side of the screen
@@ -91,10 +92,11 @@ inline asm byte ppu_read_data() { // read a byte from the ppu read port
 
 const array(bool) solidity = [false, true, true, false, true, false, false, true, true, true, true, true, false] // whether each metatile is solid
 void nmi() {
-    byte i, j
-    word tempaddr
-    bool side
-    byte tempval
+    static byte i, j
+    static word tempaddr
+    static bool side
+    static byte tempval
+    static word cur_scroll
     array buffer[8]
 	//ppu_mask = $00
 	ppu_ctrl = PPU_SPRITE8 | PPU_BKGNT0 | PPU_SPRNT1 | PPU_HORIZIO | PPU_NT2000
@@ -134,9 +136,27 @@ void nmi() {
         ppu_write_data(enemy_palette2[2])
         nmitodo &= ($ff ^ NMI_UPDPAL)
     }
-    if (nmitodo & (NMI_REDRAWL | NMI_REDRAWR | NMI_REDRAWFULL) != 0 && not(decompressing) || whichnmi != 0) { // draw a slice 
+    if (whichnmi == 19 << 2) {
+        whichnmi = 0
+    }
+    if (nmitodo & NMI_BLANKSCREEN != 0) {
         ppu_ctrl = PPU_SPRITE8 | PPU_BKGNT0 | PPU_SPRNT1 | PPU_VERTIO | PPU_NT2000
-        if ((whichnmi & $03) == 0) {
+        if (whichnmi & 32 == 0) {
+            ppu_set_addr($2000 | (whichnmi))
+        } else {
+            ppu_set_addr($2400 | (whichnmi & 31))
+        }
+        for i,0,until,30 {
+            ppu_write_data(0)
+        }
+        whichnmi += 1
+        if (whichnmi == 64) {
+            nmitodo &= (NMI_BLANKSCREEN) ^ $ff
+            whichnmi = 0
+        }
+    } else if (nmitodo & (NMI_REDRAWL | NMI_REDRAWR | NMI_REDRAWFULL) != 0 && not(decompressing) || whichnmi != 0) { // draw a slice 
+        ppu_ctrl = PPU_SPRITE8 | PPU_BKGNT0 | PPU_SPRNT1 | PPU_VERTIO | PPU_NT2000
+        if ((whichnmi & $03) == 1) {
             if ((nmitodo & NMI_REDRAWFULL) != 0) {
                 nmitodo &= (NMI_REDRAWL | NMI_REDRAWR) ^ $ff
             }
@@ -161,7 +181,7 @@ void nmi() {
                 tempaddr += 32
             }
             whichnmi += 1
-        } else if ((whichnmi & $03) == 1) {
+        } else if ((whichnmi & $03) == 2) {
             if (which_slice & 16 == 0) {
                 ppu_set_addr($2000 | ((which_slice << 1) | 1))
             } else {
@@ -173,7 +193,14 @@ void nmi() {
                 ppu_write_data(metadata3[pointer(tempaddr)[0]])
                 tempaddr += 32
             }
-            whichnmi += 1
+            whichnmi &= $fc
+            if (nmitodo & NMI_REDRAWFULL != 0) {
+                whichnmi += 4
+                which_slice += 1
+                if (whichnmi == 19 << 2) {
+                    nmitodo &= ($ff ^ (NMI_REDRAWFULL))
+                }
+            }
         } else {
             if (which_slice & 16 == 0) {
                 tempaddr = $23c0 | (which_slice >> 1)
@@ -187,15 +214,7 @@ void nmi() {
                 ppu_write_data(attribute_shadow[tempval])
                 tempval += 16 // was 8
             }
-            whichnmi &= $fc
-            if (nmitodo & NMI_REDRAWFULL != 0) {
-                whichnmi += 4
-                which_slice += 1
-                if (whichnmi == 19 << 2) {
-                    nmitodo &= ($ff ^ (NMI_REDRAWFULL))
-                    whichnmi = 0
-                }
-            }
+            whichnmi += 1
         }
     } else if (update_queue_len != 0) {
         i = update_queue_len - 1
@@ -214,14 +233,19 @@ void nmi() {
         ppu_write_data(metadata3[tempval])
         update_queue_len = i
     }
-    ppu_set_scroll(lo(scroll_x),0) // scroll properly
-    if (hi(scroll_x) & 1 == 0) {
+    if (nmitodo & NMI_BLANKSCREEN == 0) {
+        cur_scroll = scroll_x
+    } else {
+        cur_scroll = blank_scrollx
+    }
+    ppu_set_scroll(lo(cur_scroll), 0)
+    if (hi(cur_scroll) & 1 == 0) {
 	    ppu_ctrl = PPU_NMIENABLE | PPU_SPRITE8 | PPU_BKGNT0 | PPU_SPRNT1 | PPU_HORIZIO | PPU_NT2000
     } else {
         ppu_ctrl = PPU_NMIENABLE | PPU_SPRITE8 | PPU_BKGNT0 | PPU_SPRNT1 | PPU_HORIZIO | PPU_NT2400
     }
-    if (nmitodo & NMI_REDRAWFULL != 0) {
-        ppu_mask = PPU_L8BACKGROUND | PPU_L8SPRITES
+    if (nmitodo & NMI_REDRAWFULL != 0 || whichnmi == 19 << 2) {
+        ppu_mask = PPU_L8BACKGROUND | PPU_L8SPRITES | PPU_BACKGROUND
     } else if (player_health == 1) {
 	    ppu_mask = PPU_L8BACKGROUND | PPU_L8SPRITES | PPU_BACKGROUND | PPU_SPRITES | PPU_EMRED
     } else {

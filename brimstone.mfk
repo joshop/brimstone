@@ -14,7 +14,7 @@ word vel_x // x velocity, 8.8
 word vel_y // y velocity, 8.8
 byte sub_x // lower 8 bits of x
 byte sub_y // lower 8 bits of y
-byte jump_grace // frames left that you can jump
+byte jump_windup // frames you've been winding up a jump
 byte controller // controller data
 byte debug @$0696 // for debugging
 bool gravity_direction // is gravity down or up
@@ -26,6 +26,13 @@ byte attack_held_frames // number of frames attack button held down
 byte attack_frames // for tracking the attack cycle
 bool player_facing // left or right facing
 byte animation_timer // unused for now
+bool on_ground // whether player can jump, etc.
+bool has_flip
+byte jump_cooldown
+byte checkpoint_x
+byte checkpoint_y
+byte checkpoint_alt
+word blank_scrollx
 
 // TODO
 // - pop out functions in main, nmi and other big ones (oam_list?)
@@ -65,6 +72,29 @@ const byte CTRLR_LEFT = $02
 const byte CTRLR_RIGHT = $01
 const byte CTRLR_DIR = $0f
 
+void full_redraw(word new_scrollx) {
+    byte i
+    read_level_pointers(pointer.word(level0))
+    i = (hi(new_scrollx + 32) << 1)
+    if (lo(new_scrollx + 32) & $80 != 0) {
+        i |= 1
+    }
+    halves_loaded[0] = 0
+    halves_loaded[1] = 0
+    halves_loaded[2] = 0
+    halves_loaded[3] = 0
+    decompress_half_asm(i)
+    decompress_half_asm(i+1)
+    if (i != 0) {
+        decompress_half_asm(i-1)
+    }
+    decompress_half_asm(i+2)
+    which_slice = ll_slice + 2
+    blank_scrollx = scroll_x
+    scroll_x = new_scrollx
+    nmitodo |= NMI_REDRAWFULL | NMI_FINISHED | NMI_BLANKSCREEN
+    while ((nmitodo & NMI_REDRAWFULL) != 0) {} // wait until nmi done
+}
 
 void main() {
     init_rw_memory()
@@ -78,7 +108,6 @@ void main() {
     word l
     int24 temp24
     byte temp_val
-    bool on_ground
     size_test[0] = 1 // keep it compiled in
     player_palette[0] = $01
     player_palette[1] = $21
@@ -101,7 +130,10 @@ void main() {
     nmitodo = NMI_UPDPAL | NMI_REDRAWFULL // update palette and redraw whole screen
     scroll_x = 0
     player_x = $10
-    player_y = $30
+    player_y = $c8
+    checkpoint_x = lo(player_x >> 4)
+    checkpoint_y = player_y
+    checkpoint_alt = altitude
     player_health = 6
     player_lives = 3
     player_iframes = 0
@@ -123,7 +155,8 @@ void main() {
     while (nmitodo & NMI_FINISHED != 0) { // wait until nmi performed
 
     }
-    while (player_health != 0 && (player_y < $f0 || altitude != 3)) { // death conditions: out of hp or falls into a pit
+    label mainloop_again
+    while (player_health != 0 && (player_y < $f0 || altitude != 0)) { // death conditions: out of hp or falls into a pit
         update_oam_list()
         new_controller = controller
         asm {
@@ -141,41 +174,51 @@ controller_loop:
         new_controller = controller & (new_controller ^ $ff) // mask out old bits
         if (player_y >= $f0) {
             altitude += 1
-            read_level_pointers(pointer.word(level0))
             player_y = $01
             vel_y = 0
-            i = (hi(scroll_x + 32) << 1)
-            if (lo(scroll_x + 32) & $80 != 0) {
-                i |= 1
-            }
-            halves_loaded[0] = 0
-            halves_loaded[1] = 0
-            halves_loaded[2] = 0
-            halves_loaded[3] = 0
-            decompress_half_asm(i)
-            decompress_half_asm(i+1)
-            decompress_half_asm(i-1)
-            decompress_half_asm(i+2)
-            which_slice = ll_slice + 2
-            nmitodo |= NMI_REDRAWFULL | NMI_FINISHED
-            while ((nmitodo & NMI_REDRAWFULL) != 0) {} // wait until nmi done
+            enemy_count = 0
+            effect_count = 0
+            full_redraw(scroll_x)
+        }
+        if (jump_cooldown != 0) {
+            jump_cooldown -= 1
         }
         //if (controller & $40 == 0) { // ie not holding attack button
-            if (controller & CTRLR_RIGHT != 0) { // left and right motion
-                vel_x += $50
-            } else if (controller & CTRLR_LEFT != 0) {
-                vel_x -= $50
-            }
+        
         //}
         if (hi(vel_x) & $80 != 0) { // get the facing set correctly
             player_facing = true
         } else if (vel_x != 0) {
             player_facing = false
         }
-        if (controller & CTRLR_A != 0 && jump_grace != 0) { // jumping
-            vel_y -= $b0
-            if (jump_grace < 7) {
-                jump_grace = -10
+        if (controller & CTRLR_A != 0 && jump_cooldown == 0) { // jumping
+            if (jump_windup > 7 || (has_flip && new_controller & CTRLR_A != 0)) {
+                if (has_flip && controller & (CTRLR_DOWN) != 0) {
+                    vel_x = 0
+                    vel_y.hi = 6
+                    jump_cooldown = 30
+                } else if (controller & (CTRLR_LEFT | CTRLR_RIGHT) == 0) {
+                    if (not(has_flip)) {
+                        vel_y.hi -= 6
+                    }
+                } else {
+                    vel_y.hi = -5
+                    has_flip = not(has_flip)
+                    if (controller & CTRLR_LEFT != 0) {
+                        vel_x = -$180
+                    } else {
+                        vel_x = $180
+                    }
+                }
+                jump_windup = 0
+            } else {
+                jump_windup += 1
+            }
+        } else if (on_ground) {
+            if (controller & CTRLR_RIGHT != 0) { // left and right motion
+                vel_x += $50
+            } else if (controller & CTRLR_LEFT != 0) {
+                vel_x -= $50
             }
         }
         on_ground = false // will be set later
@@ -313,6 +356,11 @@ controller_loop:
                 player_health = 0
             }
         }
+        if (gravity_direction) { // apply gravity
+            vel_y -= $40
+        } else {
+            vel_y += $40
+        }
         temp24.loword.hi = player_y // add vely to y pos
         temp24.loword.lo = sub_y
         temp24.loword += vel_y // 16-bit math
@@ -342,7 +390,6 @@ controller_loop:
         if (k != 0) { // collision
             if (hi(vel_y) & $80 != 0) { // hit from above, not on ground
                 player_y += 16
-                jump_grace = 0
             } else {
                 on_ground = true
             }
@@ -352,43 +399,11 @@ controller_loop:
             on_ground = true
         }
         if (on_ground) {
-            jump_grace = 7 // can jump and dash again
             if (level_shadow[level_idx] == 4 || (player_x & $0f != 0 && j == 4)) { // spikes that kill you
                 player_health = 0
             }
         }
-        if (jump_grace != 0) { // don't ask me how this works, it handles jumping for different heights
-            if (jump_grace > 7) {
-                if (controller & $80 == 0) {
-                    jump_grace = 0
-                } else {
-                    jump_grace += 1
-                }
-            } else {
-                jump_grace -= 1
-            }
-        }
-        if (gravity_direction) { // apply gravity
-            vel_y -= $40
-        } else {
-            vel_y += $40
-        }
-        if (vel_x > 0) { // apply drag/friction
-            if (hi(vel_x) & $80 != 0) {
-                if (vel_x >> 2 == $4fff) {
-                    vel_x += 1
-                } else {
-                    vel_x -= vel_x >> 2
-                    vel_x.hi -= $c0
-                }
-            } else {
-                if (vel_x >> 2 == 0) {
-                    vel_x -= 1
-                } else {
-                    vel_x -= vel_x >> 2
-                }
-            }
-        }
+        
         if (player_x - scroll_x < $60) { // scroll forwards 60
             scroll_x = player_x - $60
         } else if (player_x - scroll_x > $a0) { // backwards // a0
@@ -458,6 +473,27 @@ controller_loop:
                 i += 1
             }
         }
+        if (not(on_ground)) {
+            jump_windup = 0
+        } else {
+            has_flip = false
+        }
+        if (vel_x > 0 && on_ground) { // apply drag/friction
+            if (hi(vel_x) & $80 != 0) {
+                if (vel_x >> 2 == $4fff) {
+                    vel_x += 1
+                } else {
+                    vel_x -= vel_x >> 2
+                    vel_x.hi -= $c0
+                }
+            } else {
+                if (vel_x >> 2 == 0) {
+                    vel_x -= 1
+                } else {
+                    vel_x -= vel_x >> 2
+                }
+            }
+        }
         i = (hi(scroll_x + 32) << 1) // the 32 is here for testing and debug
         // actually, it's necessary
         // todo: this might be highly inefficient
@@ -483,14 +519,27 @@ controller_loop:
         nmitodo |= NMI_FINISHED // nmi needs to be done
         while ((nmitodo & NMI_FINISHED) != 0) {} // wait until nmi done
     }
-    for i,0,until,32 { // wait some frames
+    if (player_lives == 0) {
+        // reset in software
+        asm {
+            JMP ($FFFC)
+        }
+    }
+    player_lives -= 1
+    update_oam_list()
+    for i,0,until,42 { // wait some frames
         nmitodo |= NMI_FINISHED
         while ((nmitodo & NMI_FINISHED) != 0) {} // wait until nmi done
     }
-    // reset in software
-    asm {
-        JMP ($FFFC)
-    }
+    player_x = word(checkpoint_x) << 4
+    player_y = checkpoint_y
+    altitude = checkpoint_alt
+    ll_slice = checkpoint_x - 3
+    player_health = 6
+    enemy_count = 0
+    effect_count = 0
+    full_redraw(player_x - $10)
+    goto mainloop_again
 }
 
 void irq() {

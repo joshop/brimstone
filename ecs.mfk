@@ -117,7 +117,12 @@ byte enemy_collision(word x, byte y, byte size) {
 
 bool shunt_player(word block_x, byte block_y, byte hitbox) {
     sbyte diff_x, diff_y
-    if (check_collision(player_x, player_y, block_x, block_y, 16, hitbox)) {
+    byte ceil_y
+    ceil_y = player_y
+    if (sub_y != 0) {
+        ceil_y += 1
+    }
+    if (check_collision(player_x, ceil_y, block_x, block_y, 16, hitbox)) {
         diff_x = lo(player_x - block_x)
         diff_y = player_y - block_y
         if (diff_y > diff_x) {
@@ -140,7 +145,7 @@ bool shunt_player(word block_x, byte block_y, byte hitbox) {
                 player_y = block_y - 15
                 sub_y = 0
                 vel_y = 0
-                jump_grace = 7
+                on_ground = true
             }
         }
         return true

@@ -4,7 +4,6 @@ import enemies
 import level
 import sprite
 import tiles
-import defines
 
 
 volatile byte breakpt @ $6C6 // for debugging
@@ -66,12 +65,14 @@ const byte CTRLR_LEFT = $02
 const byte CTRLR_RIGHT = $01
 const byte CTRLR_DIR = $0f
 
+
 void main() {
     init_rw_memory()
 	ppu_ctrl = PPU_NMIENABLE | PPU_BKGNT0 | PPU_SPRNT1 | PPU_SPRITE8 | PPU_NT2000 // things disabled
 	ppu_mask = PPU_L8BACKGROUND | PPU_L8SPRITES
     enemy_count = 0
     effect_count = 0
+    altitude = 0
     read_level_pointers(pointer.word(level0))
     byte i,j,k
     word l
@@ -84,7 +85,7 @@ void main() {
     player_palette[2] = $31
     dagger_palette[0] = $01
     dagger_palette[1] = $21
-    dagger_palette[2] = $31
+    dagger_palette[2] = $30
     enemy_palette1[0] = $05
     enemy_palette1[1] = $16
     enemy_palette1[2] = $36
@@ -111,15 +112,18 @@ void main() {
     dagger_flags[4] = DAGGER_UNAVAILABLE
     dagger_flags[0] = DAGGER_FREE
     dagger_flags[1] = DAGGER_FREE
+    for i,0,until,16 {
+        max_subweapons[i] = 0
+        ammo_subweapons[i] = 0
+    }
     max_subweapons[0] = 2
     max_subweapons[1] = 1
-    max_subweapons[2] = 0
-    max_subweapons[3] = 0
+    ammo_subweapons[0] = $ff
     ll_slice = -2 // since there's a 2-slice buffer on each end
     while (nmitodo & NMI_FINISHED != 0) { // wait until nmi performed
 
     }
-    while (player_health != 0 && player_y < $f0) { // death conditions: out of hp or falls into a pit
+    while (player_health != 0 && (player_y < $f0 || altitude != 3)) { // death conditions: out of hp or falls into a pit
         update_oam_list()
         new_controller = controller
         asm {
@@ -135,6 +139,27 @@ controller_loop:
             BCC controller_loop
         }
         new_controller = controller & (new_controller ^ $ff) // mask out old bits
+        if (player_y >= $f0) {
+            altitude += 1
+            read_level_pointers(pointer.word(level0))
+            player_y = $01
+            vel_y = 0
+            i = (hi(scroll_x + 32) << 1)
+            if (lo(scroll_x + 32) & $80 != 0) {
+                i |= 1
+            }
+            halves_loaded[0] = 0
+            halves_loaded[1] = 0
+            halves_loaded[2] = 0
+            halves_loaded[3] = 0
+            decompress_half_asm(i)
+            decompress_half_asm(i+1)
+            decompress_half_asm(i-1)
+            decompress_half_asm(i+2)
+            which_slice = ll_slice + 2
+            nmitodo |= NMI_REDRAWFULL | NMI_FINISHED
+            while ((nmitodo & NMI_REDRAWFULL) != 0) {} // wait until nmi done
+        }
         //if (controller & $40 == 0) { // ie not holding attack button
             if (controller & CTRLR_RIGHT != 0) { // left and right motion
                 vel_x += $50
@@ -156,11 +181,16 @@ controller_loop:
         on_ground = false // will be set later
         if (subweapon & $f0 != 0) {
             subweapon -= $10 // decrement cooldown by a tick
-        } else if (new_controller & CTRLR_SELECT != 0 && subweapon & $f0 == 0) {
+        } else if ((new_controller & CTRLR_SELECT != 0 && subweapon & $f0 == 0) || ammo_subweapons[subweapon] == 0) {
             // needs to be off cooldown to fire dagger or swap subweapons
             // check if any daggers are in play or recharging
             // todo: be more graceful here
             // allow switching in cooldown windows
+            if (ammo_subweapons[subweapon] != 0) {
+                k = $f0 // re-add cooldown
+            } else {
+                k = $80
+            }
             for i,0,until,5 {
                 j = dagger_flags[i] & DAGGER_STATE
                 if (j == DAGGER_OUT || j == DAGGER_RECHARGE) {
@@ -170,12 +200,15 @@ controller_loop:
             do {
                 subweapon += 1
                 // change from 4 when more subweapons added
-                if (subweapon == 4) {
+                if (subweapon == 16) {
                     subweapon = 0
                     break
                 }
-            } while (max_subweapons[subweapon] == 0)
+            } while (max_subweapons[subweapon] == 0 || ammo_subweapons[subweapon] == 0)
             j = max_subweapons[subweapon]
+            if (j > ammo_subweapons[subweapon]) {
+                j = ammo_subweapons[subweapon]
+            }
             for i,0,until,5 {
                 if (i < j) {
                     dagger_flags[i] = DAGGER_FREE
@@ -184,7 +217,13 @@ controller_loop:
                 }
                 dagger_times[i] = $00
             }
-            subweapon |= $f0 // re-add cooldown
+            subweapon |= k
+        }
+        if (subweapon & $f0 == $80) {
+            dagger_palette[0] = dagger_pals0[subweapon & $0f]
+            dagger_palette[1] = dagger_pals1[subweapon & $0f]
+            dagger_palette[2] = dagger_pals2[subweapon & $0f]
+            nmitodo |= NMI_UPDPAL
         }
         label subweapon_inuse
         if ((new_controller & CTRLR_B != 0 && controller & (CTRLR_DIR) != 0) && subweapon & $f0 == 0) {
@@ -205,11 +244,19 @@ controller_loop:
                 dagger_flags[i] = j | (subweapon & $0f)
                 dagger_xs[i] = player_x
                 dagger_ys[i] = player_y
+                if (controller & CTRLR_DOWN != 0) {
+                    dagger_ys[i] += 8
+                }
                 // 4 pixels/frame
-                if (controller & CTRLR_UP != 0) {
-                    j = -$30
-                } else if (controller & CTRLR_DOWN != 0) {
+                if (controller & (CTRLR_LEFT | CTRLR_RIGHT) != 0) {
+                    j = $10
+                } else {
                     j = $30
+                }
+                if (controller & CTRLR_UP != 0) {
+                    j = -j
+                } else if (controller & CTRLR_DOWN != 0) {
+                    //
                 } else {
                     j = $00
                 }
@@ -356,8 +403,8 @@ controller_loop:
         i = 0
         while (i < enemy_count) {
             j = hi(player_x-enemy_xs[i]) // to find if it's too far to stay loaded
-            if (enemy_healths[i] == 0 || enemy_healths[i] & $80 != 0 || enemy_ys[i] >= $f0 || (j != 0 && j != $ff)) { // || hi(player_x-enemy_xs[i]) != 0 && hi(player_x-enemy_xs[i]) != $ff
-                if (enemy_healths[i] == 0 && enemy_flags[enemy_types[i]] & $20 == 0) {
+            if (enemy_healths[i] == 0 || enemy_healths[i] & $80 != 0 || (enemy_ys[i] >= $f0 || (j != 0 && j != $ff) && enemy_flags[enemy_types[i]] & ENEMY_PERSISTENT == 0)) { // || hi(player_x-enemy_xs[i]) != 0 && hi(player_x-enemy_xs[i]) != $ff
+                if (enemy_healths[i] == 0 && enemy_flags[enemy_types[i]] & ENEMY_INVISIBLE == 0) {
                     create_effect($80, enemy_xs[i], enemy_ys[i], $20, 0) // enemy dying from damage
                 }
                 destroy_enemy(i)
@@ -390,12 +437,16 @@ controller_loop:
             //    STA $EC
             //}
             l = player_x-enemy_xs[i]
-            if ((hi(l) == $ff && lo(l) > $f0) || (hi(l) == 0 && lo(l) < (enemy_hitboxes[j] & $f0) >> 1)) {
-                if (player_y - enemy_ys[i] > sbyte(-16) && (player_y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
-                    if (enemy_flags[j] & ENEMY_HAS_COLLISION != 0) {
-                        call(enemy_cfuncs[j], i) // collision
-                    }
-                }
+            // todo: this should really just be a call to enemy_collision (??)
+            //if ((hi(l) == $ff && lo(l) > $f0) || (hi(l) == 0 && lo(l) < (enemy_hitboxes[j] & $f0) >> 1)) {
+            //    if (player_y - enemy_ys[i] > sbyte(-16) && (player_y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
+            //        if (enemy_flags[j] & ENEMY_HAS_COLLISION != 0) {
+            //            call(enemy_cfuncs[j], i) // collision
+            //        }
+            //    }
+            //}
+            if (check_collision(player_x, player_y, enemy_xs[i], enemy_ys[i], 16, enemy_hitboxes[j]) && enemy_flags[j] & ENEMY_HAS_COLLISION != 0) {
+                call(enemy_cfuncs[j], i) // collision
             }
         }
         i = 0

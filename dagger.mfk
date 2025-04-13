@@ -11,8 +11,9 @@ array dagger_flags[5]
 // T: dagger type
 array dagger_yvels[5]
 
-byte subweapon // top 4 bits: weapon type, bottom 4: switch cooldown
-array max_subweapons[4] // max of each subweapon
+byte subweapon // bottom 4 bits: weapon type, top 4: switch cooldown
+array max_subweapons[16] // max of each subweapon
+array ammo_subweapons[16] // ammo or $ff for infinite
 
 // the H-flip and V-flip bits of each dagger animation frame
 const array dagger_anim = [%00000000, %01000000, %11000000, %10000000]
@@ -40,9 +41,32 @@ const byte dagger_xvel = 3
 const byte dagger_gravity = 4
 const byte dagger_freetime = $0c
 
+const array dagger_pals0 = [$01, $05]
+const array dagger_pals1 = [$21, $16]
+const array dagger_pals2 = [$31, $36]
+
+void expend_dagger(byte i) {
+    byte b,j
+    dagger_flags[i] += DAGGER_EXPEND
+    dagger_times[i] = DAGGER_COOLDOWN
+    if (ammo_subweapons[subweapon] != $ff) {
+        ammo_subweapons[subweapon] -= 1
+        b = 0
+        for j,0,until,max_subweapons[subweapon] {
+            if (dagger_flags[j] & DAGGER_DOWN == 0) {
+                b += 1
+            }
+        }
+        if (b == ammo_subweapons[subweapon]) {
+            dagger_flags[i] = DAGGER_UNAVAILABLE
+        }
+
+    }
+}
+
 void step_dagger(byte i) {
     word a
-    byte b
+    byte b,j
     if (dagger_times[i] & DAGGER_LIFESPAN == $7f) {
         dagger_times[i] &= $ff ^ DAGGER_LIFESPAN // don't overflow into grav bit
     }
@@ -50,11 +74,14 @@ void step_dagger(byte i) {
     if (b != NO_COLLISION && enemy_healths[b] != 0 && enemy_flags[enemy_types[b]] & ENEMY_VULNERABLE != $00) {
         enemy_healths[b] -= 1
         // change from in use state to recharging
-        dagger_flags[i] += DAGGER_EXPEND
-        dagger_times[i] = DAGGER_COOLDOWN
+        if (subweapon == $01) { // todo: return dispatch instead
+            create_effect($20, dagger_xs[i], dagger_ys[i], 12, EFFECT_ANIMATE | 3)
+        }
+        expend_dagger(i)
         return
     }
     dagger_times[i] += 1
+    
     if (dagger_flags[i] & DAGGER_HASXVEL != 0) {
         if (dagger_flags[i] & DAGGER_XVEL == DAGGER_LEFTXVEL) {
             dagger_xs[i] -= dagger_xvel
@@ -62,7 +89,7 @@ void step_dagger(byte i) {
             dagger_xs[i] += dagger_xvel
         }
     }
-    if (dagger_yvels[i] & NEGATIVE == 0) {
+    if (dagger_yvels[i] & $80 == 0) {
         dagger_ys[i] += dagger_yvels[i] >> 4
     } else {
         dagger_ys[i] += $f0 | (dagger_yvels[i] >> 4)
@@ -77,9 +104,8 @@ void step_dagger(byte i) {
     }
     // base dagger velocity: 4p/f
     b = hi(dagger_xs[i]-scroll_x) // is on screen
-    if (dagger_ys[i] > YMAXIMUM || (b != $00)) {
-        dagger_flags[i] += DAGGER_EXPEND
-        dagger_times[i] = DAGGER_COOLDOWN
+    if (dagger_ys[i] > $f0 || (b != $00)) {
+        expend_dagger(i)
         return
     }
     a = dagger_xs[i] // weird compiler bug?
@@ -87,8 +113,7 @@ void step_dagger(byte i) {
     level_idx.hi = 0
     find_level_idx(a, b, level_idx)
     if (solidity[level_shadow[level_idx]]) {
-        dagger_flags[i] += DAGGER_EXPEND
-        dagger_times[i] = DAGGER_COOLDOWN
+        expend_dagger(i)
         return
     }
     return

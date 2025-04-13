@@ -4,8 +4,10 @@ const array enemy_flags = [
     ENEMY_HAS_AI | ENEMY_HAS_COLLISION | ENEMY_VULNERABLE,
     ENEMY_HAS_AI | ENEMY_HAS_COLLISION | ENEMY_VULNERABLE,
     ENEMY_HAS_AI | ENEMY_INVISIBLE,
-    ENEMY_HAS_AI | ENEMY_HAS_COLLISION | ENEMY_VULNERABLE] // has ai | has collision | invisible | vulnerable
-const array enemy_hitboxes = [$22, $22, $00, $11] // x size : y size
+    ENEMY_HAS_AI | ENEMY_HAS_COLLISION | ENEMY_VULNERABLE,
+    ENEMY_HAS_AI | ENEMY_HAS_COLLISION,
+    ENEMY_HAS_AI | ENEMY_PERSISTENT] // has ai | has collision | invisible | vulnerable
+const array enemy_hitboxes = [$22, $22, $00, $11, $11, $22] // x size : y size
 
 byte get_metasprite(byte id) {
     // this function is hellzone, don't worry about it looking bad
@@ -25,6 +27,12 @@ byte get_metasprite(byte id) {
     }
     if (j == 3) {
         return $0f
+    }
+    if (j == 4) {
+        return $1f
+    }
+    if (j == 5) {
+        return $0c
     }
     return $ff
 }
@@ -145,9 +153,57 @@ void sd_enemy_collide(byte id) {
     basic_enemy_collide(id)
     enemy_healths[id] = 0
 }
+void pickup_ai(byte id) {
+    enemy_data1[id] += 2
+    if (enemy_data1[id] == $40 || enemy_data1[id] == 0) {
+        enemy_ys[id] -= 2
+    }
+    if (enemy_data1[id] == $80 || enemy_data1[id] == $c0) {
+        enemy_ys[id] += 2
+    }
+}
+void pickup_collide(byte id) {
+    ammo_subweapons[enemy_data3[id]] += 5
+    enemy_ys[id] = $ff
+    enemy_healths[id] = 0
+}
+void platform_ai(byte id) {
+//    player_health -= 1
+    if (shunt_player(enemy_xs[id], enemy_ys[id], $22)) {
+        enemy_data3[id] |= $80
+    }
+    if (jump_grace == 0 || lo(player_x - enemy_xs[id]) > sbyte(16) || lo(player_x - enemy_xs[id]) < sbyte(-16)) {
+        enemy_data3[id] &= $7f
+    } 
+    enemy_data1[id] += 1
+    if (enemy_data1[id] == $80) {
+        enemy_data2[id] += 1
+        enemy_data1[id] = 0
+    }
+    if ((enemy_data2[id] & $7f) == (enemy_data3[id] & $7f)) {
+        enemy_data2[id] ^= META_HFLIP
+        enemy_data2[id] &= META_HFLIP
+    }
+    if (enemy_data2[id] & META_HFLIP == 0) {
+        enemy_xs[id] -= 1
+        if (enemy_data3[id] & $80 != 0) {
+            player_x -= 1
+        }
+    } else {
+        enemy_xs[id] += 1
+        if (enemy_data3[id] & $80 != 0) {
+            player_x += 1
+        }
+    }
+}
+void null_collide(byte id) {
+
+}
 // 0: simple
 // 1: rat
 // 2: floor
 // 3: bullet
-const array(function.byte.to.void) enemy_funcs = [simple_enemy_ai.pointer, prat_enemy_ai.pointer, ffloor_enemy_ai.pointer, bullet_enemy_ai.pointer]
-const array(function.byte.to.void) enemy_cfuncs = [basic_enemy_collide.pointer, basic_enemy_collide.pointer, basic_enemy_collide.pointer, sd_enemy_collide.pointer]
+// 4: weapon pickup
+// 5: moving platform
+const array(function.byte.to.void) enemy_funcs = [simple_enemy_ai.pointer, prat_enemy_ai.pointer, ffloor_enemy_ai.pointer, bullet_enemy_ai.pointer, pickup_ai.pointer, platform_ai.pointer]
+const array(function.byte.to.void) enemy_cfuncs = [basic_enemy_collide.pointer, basic_enemy_collide.pointer, basic_enemy_collide.pointer, sd_enemy_collide.pointer, pickup_collide.pointer, null_collide.pointer]

@@ -32,6 +32,7 @@ const byte ENEMY_HAS_AI = $80
 const byte ENEMY_HAS_COLLISION = $40
 const byte ENEMY_INVISIBLE = $20
 const byte ENEMY_VULNERABLE = $10
+const byte ENEMY_PERSISTENT = $08
 
 const byte EFFECT_HFLIP = $40
 const byte EFFECT_VFLIP = $80
@@ -85,16 +86,64 @@ void destroy_effect(byte id) {
 
 const byte NO_COLLISION = $ff
 
+bool check_collision(word x, byte y, word block_x, byte block_y, byte size, byte hitbox) {
+    word l
+    l = x - block_x
+    if ((hi(l) == $ff && lo(l) > byte(-size)) || (hi(l) == 0 && lo(l) < ((hitbox & $f0) >> 1))) {
+        if (y - block_y > sbyte(-size) && (y - block_y) < sbyte((hitbox & $0f) << 3)) {
+            return true
+        }
+    }
+    return false
+}
+
 byte enemy_collision(word x, byte y, byte size) {
     // don't forget, this function can probably be optimized
     byte i,j
+    
     for i,0,until,enemy_count {
         j = enemy_types[i]
-        if (lo(x - enemy_xs[i]) > sbyte(-size) && lo(x - enemy_xs[i]) < sbyte((enemy_hitboxes[j] & $f0) >> 1)) {
-            if (y - enemy_ys[i] > sbyte(-size) && (y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
-                return i
-            }
+        //if (lo(x - enemy_xs[i]) > sbyte(-size) && lo(x - enemy_xs[i]) < sbyte((enemy_hitboxes[j] & $f0) >> 1)) {
+        //    if (y - enemy_ys[i] > sbyte(-size) && (y - enemy_ys[i]) < sbyte((enemy_hitboxes[j] & $0f) << 3)) {
+        //        return i
+        //    }
+        //}
+        if (check_collision(x, y, enemy_xs[i], enemy_ys[i], size, enemy_hitboxes[j])) {
+            return i
         }
     }
     return NO_COLLISION
+}
+
+bool shunt_player(word block_x, byte block_y, byte hitbox) {
+    sbyte diff_x, diff_y
+    if (check_collision(player_x, player_y, block_x, block_y, 16, hitbox)) {
+        diff_x = lo(player_x - block_x)
+        diff_y = player_y - block_y
+        if (diff_y > diff_x) {
+            if (diff_y >= -diff_x) {
+                // shunt DOWN
+                player_y = block_y + ((hitbox & $0f) << 3)
+                vel_y = 0
+            } else {
+                // shunt LEFT
+                player_x = block_x - 15
+                vel_x = 0
+            }
+        } else {
+            if (diff_y > -diff_x) {
+                // shunt RIGHT
+                player_x = block_x + ((hitbox & $f0) >> 1)
+                vel_x = 0
+            } else {
+                // shunt UP
+                player_y = block_y - 15
+                sub_y = 0
+                vel_y = 0
+                jump_grace = 7
+            }
+        }
+        return true
+    }
+    return false
 }

@@ -106,7 +106,7 @@ void update_oam_list() { // draw all metasprites to oam
     word g
     origin = oam_index
     // find player sprite
-    if (jump_grace != 6) {
+    if (jump_grace == 0 || jump_grace > 7) {
         // in-air
         j = 3
     } else if (vel_x == 0) {
@@ -142,11 +142,11 @@ void update_oam_list() { // draw all metasprites to oam
             // this code handles the "shift-up/down" animation when you switch
             // gets remaining time, shift, absolute value
             l = (subweapon >> 3) - 16
-            if (l & NEGATIVE != 0) {
+            if (l & $80 != 0) {
                 l = -l
             }
             // dagger palette
-            draw_metasprite((i + 1) << 3, l, k, dagger_anim[j] | 1)
+            draw_metasprite((i + 1) << 3, l, k, dagger_anim[j])
         }
         if (dagger_flags[i] & DAGGER_STATE != DAGGER_OUT) {
             continue
@@ -156,7 +156,12 @@ void update_oam_list() { // draw all metasprites to oam
         // 01 -> 10
         // 10 -> 11
         // 11 -> 01
-        draw_metasprite(lo(dagger_xs[i] - scroll_x), dagger_ys[i], $9c, dagger_anim[j] | 1)
+        draw_metasprite(lo(dagger_xs[i] - scroll_x), dagger_ys[i], $9c, dagger_anim[j])
+    }
+    if ((subweapon & $f0 == 0) && ammo_subweapons[subweapon] < 5) {
+        // todo: better number rendering
+        k = $9d + ammo_subweapons[subweapon]
+        draw_metasprite(50, 16, k, 0)
     }
     // todo: optimize player health code
     if (player_health == 1) {
@@ -231,7 +236,7 @@ void update_oam_list() { // draw all metasprites to oam
                 j = effect_timers[i] >> (effect_flags[i] & EFFECT_PERIOD)
                 if (effect_flags[i] & EFFECT_MODE == EFFECT_CYCLE2) {
                     j &= $03
-                } else if (effect_flags[i] & EFFECT_4ORANIM != 0) { // this WAS a $08, let's see what happens
+                } else if (effect_flags[i] & EFFECT_CYCLE4 == EFFECT_CYCLE4) { // this WAS a $08, let's see what happens
                     j &= $07
                 }
             } else {

@@ -7,6 +7,7 @@ pointer metadata3
 pointer metadata4
 pointer.pointer metaspritedata // array of metasprite pointer
 
+byte altitude
 byte which_slice
 byte ll_slice // leftmost loaded slice
 
@@ -17,14 +18,14 @@ const array level0 @$E000 = file("level.bin") // compressed level data
 import ecs
 
 void read_level_pointers(pointer.word level) { // read in the level data pointers
-    leveldata = level[0]
-    metadata0 = level[1]
-    metadata1 = level[2]
-    metadata2 = level[3]
-    metadata3 = level[4]
-    metadata4 = level[5]
-    metaspritedata = pointer.pointer(level[6])
-    patterndata = pointer.pointer(level[7].pointer)
+    leveldata = level[altitude]
+    metadata0 = level[4]
+    metadata1 = level[5]
+    metadata2 = level[6]
+    metadata3 = level[7]
+    metadata4 = level[8]
+    metaspritedata = pointer.pointer(level[9])
+    patterndata = pointer.pointer(level[10].pointer)
 }
 
 void decompress_half_asm(byte half_idx) {
@@ -278,14 +279,25 @@ void decompress_half_asm(byte half_idx) {
         ?CPX enemy_count
         ?BNE point_cmd_loop
         ?STA enemy_tags,X
+        ?INY
+        ?LDA (current_obj), Y
+        ?STA enemy_data3, X
     }
     create_enemy(cur_header & %00111111, word(current_x) << 4, current_y << 4)
     asm {
     point_cmd_skip2:
         ?INC current_x
         ?INC current_y
-        ?INC current_obj
-        ?INC current_obj
+        //?INC current_obj
+        //?INC current_obj
+        //?INC current_obj
+        ?LDA current_obj
+        ?CLC
+        ?ADC #$03
+        ?STA current_obj
+        ?BCC point_cmd_skip3
+        ?INC current_obj+1
+    point_cmd_skip3:
         ?JMP main_loop_asm2
     point_cmd_skip1:
         ?LDA cur_header
